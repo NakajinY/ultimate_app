@@ -22,10 +22,10 @@ DROP_TYPE_OPTIONS = [
 THROW_CATEGORY_OPTIONS = ["ミート", "シュート", "ハンド展開"]
 THROW_DETAIL_OPTIONS = {
     "ミート": ["インサイ", "オープン"],
-    "シュート": ["シュート"],
+    "シュート": ["ストレート", "ボンバー", "裏シュート","対角シュート"],
     "ハンド展開": ["インサイド", "裏", "オープン", "かけ上がり"],
 }
-PLACE_SIDE_OPTIONS = ["ハメ側", "アンハメ側"]
+PLACE_SIDE_OPTIONS = ["ハメ側","真ん中", "アンハメ側"]
 PLACE_END_OPTIONS = ["エンド前", "Not"]
 SCORE_PATTERN_OPTIONS = ["シュートがドーン", "ミート、展開コツコツ", "TOからの速攻"]
 GSHEETS_WORKSHEET = "turn_log"
