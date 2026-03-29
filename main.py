@@ -1,6 +1,7 @@
 import json
 import importlib
 from datetime import date
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -32,6 +33,7 @@ PLACE_END_OPTIONS = ["序盤", "中盤", "エンド前"]
 SCORE_PATTERN_OPTIONS = ["シュートがドーン", "ミート、展開コツコツ", "TOからの速攻"]
 GSHEETS_WORKSHEET = "turn_log"
 GSHEETS_EVENTS_WORKSHEET = "event_log"
+UNKNOWN_VALUE = "-"
 
 
 def parse_bool(value: object) -> bool:
@@ -45,6 +47,24 @@ def safe_str(value: object, default: str = "") -> str:
     if text.lower() == "nan":
         return default
     return text
+
+
+def normalize_unknown(value: object) -> str:
+    text = safe_str(value, "").strip()
+    return text if text else UNKNOWN_VALUE
+
+
+def now_iso() -> str:
+    return datetime.now().replace(microsecond=0).isoformat()
+
+
+def build_match_id(match_date: object, match_title: str, team_a_name: str, team_b_name: str) -> str:
+    date_str = safe_str(match_date, "")
+    return f"{normalize_unknown(date_str)}_{normalize_unknown(match_title)}_{normalize_unknown(team_a_name)}_vs_{normalize_unknown(team_b_name)}"
+
+
+def build_turn_id(match_id: str, turn_no: int) -> str:
+    return f"{match_id}-{turn_no}"
 
 
 def parse_events_json(value: object) -> list[dict]:
@@ -102,6 +122,7 @@ def initialize_input_state() -> None:
         "match_title": "練習試合",
         "team_a_name": "Aチーム",
         "team_b_name": "Bチーム",
+        "input_by": UNKNOWN_VALUE,
         "offense_start_team": "A",
         "team_a_member": MEMBER_OPTIONS[0],
         "team_b_member": MEMBER_OPTIONS[2],
@@ -113,8 +134,8 @@ def initialize_input_state() -> None:
         "team_b_defense_type": DEFENSE_TYPE_OPTIONS[0],
         "drop_count": 0,
         "score_pattern": SCORE_PATTERN_OPTIONS[0],
-        "score_from_player": "",
-        "score_to_player": "",
+        "score_from_player": UNKNOWN_VALUE,
+        "score_to_player": UNKNOWN_VALUE,
         "pending_turn_input_reset": False,
     }
     for key, value in defaults.items():
@@ -134,8 +155,8 @@ def reset_turn_inputs() -> None:
     st.session_state.team_b_defense_type = DEFENSE_TYPE_OPTIONS[0]
     st.session_state.drop_count = 0
     st.session_state.score_pattern = SCORE_PATTERN_OPTIONS[0]
-    st.session_state.score_from_player = ""
-    st.session_state.score_to_player = ""
+    st.session_state.score_from_player = UNKNOWN_VALUE
+    st.session_state.score_to_player = UNKNOWN_VALUE
 
     for key in list(st.session_state.keys()):
         if key.startswith("event_"):
@@ -179,10 +200,31 @@ def save_turns_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         return False, "Google Sheets接続が見つかりません。設定または依存パッケージを確認してください。"
 
     try:
-        conn.update(worksheet=GSHEETS_WORKSHEET, data=df)
+        # turn_log: turn_idでUPSERT
+        existing_turn_df = conn.read(worksheet=GSHEETS_WORKSHEET, ttl=0)
+        if existing_turn_df is None or existing_turn_df.empty:
+            merged_turn_df = df.copy()
+        else:
+            existing_turn_df = existing_turn_df.loc[:, ~existing_turn_df.columns.astype(str).str.startswith("Unnamed:")]
+            merged_turn_df = pd.concat([existing_turn_df, df], ignore_index=True)
+            if "turn_id" in merged_turn_df.columns:
+                merged_turn_df = merged_turn_df.drop_duplicates(subset=["turn_id"], keep="last")
+
+        conn.update(worksheet=GSHEETS_WORKSHEET, data=merged_turn_df)
+
+        # event_log: 追記中心（event_id単位で最新を採用）
         event_df = build_event_export_dataframe(st.session_state.turns)
-        conn.update(worksheet=GSHEETS_EVENTS_WORKSHEET, data=event_df)
-        return True, f"Google Sheets（{GSHEETS_WORKSHEET} / {GSHEETS_EVENTS_WORKSHEET}）へ保存しました。"
+        existing_event_df = conn.read(worksheet=GSHEETS_EVENTS_WORKSHEET, ttl=0)
+        if existing_event_df is None or existing_event_df.empty:
+            merged_event_df = event_df.copy()
+        else:
+            existing_event_df = existing_event_df.loc[:, ~existing_event_df.columns.astype(str).str.startswith("Unnamed:")]
+            merged_event_df = pd.concat([existing_event_df, event_df], ignore_index=True)
+            if "event_id" in merged_event_df.columns:
+                merged_event_df = merged_event_df.drop_duplicates(subset=["event_id"], keep="last")
+
+        conn.update(worksheet=GSHEETS_EVENTS_WORKSHEET, data=merged_event_df)
+        return True, f"Google Sheets（{GSHEETS_WORKSHEET}:UPSERT / {GSHEETS_EVENTS_WORKSHEET}:APPEND中心）へ保存しました。"
     except Exception as e:
         return False, f"Google Sheets保存に失敗しました: {e}"
 
@@ -197,11 +239,17 @@ def sync_turns_to_gsheets_from_state() -> tuple[bool, str]:
 
 def build_event_export_dataframe(turns: list[dict]) -> pd.DataFrame:
     columns = [
+        "event_id",
+        "match_id",
+        "turn_id",
         "turn_no",
         "match_date",
         "match_title",
         "team_a_name",
         "team_b_name",
+        "created_at",
+        "updated_at",
+        "input_by",
         "event_type",
         "team",
         "wind_direction",
@@ -226,6 +274,11 @@ def build_event_export_dataframe(turns: list[dict]) -> pd.DataFrame:
         team_b_name = safe_str(turn.get("team_b_name", "Bチーム"), "Bチーム")
         team_a_wind = safe_str(turn.get("team_a_wind", ""))
         team_b_wind = safe_str(turn.get("team_b_wind", ""))
+        match_id = normalize_unknown(turn.get("match_id", ""))
+        turn_id = normalize_unknown(turn.get("turn_id", ""))
+        created_at = normalize_unknown(turn.get("created_at", ""))
+        updated_at = normalize_unknown(turn.get("updated_at", ""))
+        input_by = normalize_unknown(turn.get("input_by", ""))
 
         # 得点イベント（1ターン=1得点）
         point_winner_code = normalize_team_code(turn.get("point_winner", "A"), team_a_name, team_b_name, "A")
@@ -233,11 +286,17 @@ def build_event_export_dataframe(turns: list[dict]) -> pd.DataFrame:
         score_wind = team_a_wind if point_winner_code == "A" else team_b_wind
         rows.append(
             {
+                "event_id": f"{turn_id}-score",
+                "match_id": match_id,
+                "turn_id": turn_id,
                 "turn_no": i,
                 "match_date": safe_str(turn.get("match_date", "")),
                 "match_title": safe_str(turn.get("match_title", "")),
                 "team_a_name": team_a_name,
                 "team_b_name": team_b_name,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "input_by": input_by,
                 "event_type": "得点",
                 "team": score_team_name,
                 "wind_direction": score_wind,
@@ -256,7 +315,7 @@ def build_event_export_dataframe(turns: list[dict]) -> pd.DataFrame:
             }
         )
 
-        for event in events:
+        for idx, event in enumerate(events, start=1):
             event_type = safe_str(event.get("cause", ""))
             mistake_team_code = normalize_team_code(
                 event.get("mistake_team", ""),
@@ -291,11 +350,17 @@ def build_event_export_dataframe(turns: list[dict]) -> pd.DataFrame:
 
             rows.append(
                 {
+                    "event_id": f"{turn_id}-event-{idx}",
+                    "match_id": match_id,
+                    "turn_id": turn_id,
                     "turn_no": i,
                     "match_date": safe_str(turn.get("match_date", "")),
                     "match_title": safe_str(turn.get("match_title", "")),
                     "team_a_name": team_a_name,
                     "team_b_name": team_b_name,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                    "input_by": input_by,
                     "event_type": event_type,
                     "team": team_name_from_code(event_team_code, team_a_name, team_b_name)
                     if event_team_code in {"A", "B"}
@@ -355,6 +420,18 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
         records.append(
             {
                 "turn_no": int(row.get("turn_no", len(records) + 1)),
+                "match_id": normalize_unknown(
+                    row.get(
+                        "match_id",
+                        build_match_id(
+                            row.get("match_date", ""),
+                            safe_str(row.get("match_title", "練習試合"), "練習試合"),
+                            safe_str(row.get("team_a_name", "Aチーム"), "Aチーム"),
+                            safe_str(row.get("team_b_name", "Bチーム"), "Bチーム"),
+                        ),
+                    )
+                ),
+                "turn_id": safe_str(row.get("turn_id", "")),
                 "match_date": safe_str(row.get("match_date", "")),
                 "match_title": safe_str(row.get("match_title", "練習試合"), "練習試合"),
                 "team_a_name": safe_str(row.get("team_a_name", "Aチーム"), "Aチーム"),
@@ -404,6 +481,9 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
                 "score_pattern": safe_str(row.get("score_pattern", "")),
                 "score_from_player": safe_str(row.get("score_from_player", "")),
                 "score_to_player": safe_str(row.get("score_to_player", "")),
+                "input_by": normalize_unknown(row.get("input_by", "")),
+                "created_at": normalize_unknown(row.get("created_at", now_iso())),
+                "updated_at": normalize_unknown(row.get("updated_at", now_iso())),
                 "drop_count": len(events),
                 "drop_events": events,
                 "drop_events_json": json.dumps(events, ensure_ascii=False),
@@ -413,6 +493,8 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
 
     for i, record in enumerate(records, start=1):
         record["turn_no"] = i
+        if safe_str(record.get("turn_id", "")).strip() == "":
+            record["turn_id"] = build_turn_id(record["match_id"], i)
 
     return records
 
@@ -422,10 +504,15 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
                 "turn_no",
+                "match_id",
+                "turn_id",
                 "match_date",
                 "match_title",
                 "team_a_name",
                 "team_b_name",
+                "created_at",
+                "updated_at",
+                "input_by",
                 "offense_start_team",
                 "offense_start_team_name",
                 "point_winner",
@@ -450,13 +537,31 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
     rows: list[dict] = []
     for i, turn in enumerate(turns, start=1):
         events = turn.get("drop_events", [])
+        match_id = normalize_unknown(
+            turn.get(
+                "match_id",
+                build_match_id(
+                    turn.get("match_date", ""),
+                    turn.get("match_title", "練習試合"),
+                    turn.get("team_a_name", "Aチーム"),
+                    turn.get("team_b_name", "Bチーム"),
+                ),
+            )
+        )
+        created_at = normalize_unknown(turn.get("created_at", now_iso()))
+        updated_at = normalize_unknown(turn.get("updated_at", created_at))
         rows.append(
             {
                 "turn_no": i,
+                "match_id": match_id,
+                "turn_id": build_turn_id(match_id, i),
                 "match_date": turn.get("match_date", ""),
                 "match_title": turn.get("match_title", "練習試合"),
                 "team_a_name": turn.get("team_a_name", "Aチーム"),
                 "team_b_name": turn.get("team_b_name", "Bチーム"),
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "input_by": normalize_unknown(turn.get("input_by", "")),
                 "offense_start_team": turn.get("offense_start_team", "A"),
                 "offense_start_team_name": team_name_from_code(
                     turn.get("offense_start_team", "A"),
@@ -507,54 +612,67 @@ def add_turn(
     match_title: str,
     team_a_name: str,
     team_b_name: str,
+    input_by: str,
     drop_events: list[dict],
 ) -> None:
+    created_at = now_iso()
+    safe_match_title = normalize_unknown(match_title)
+    safe_team_a_name = normalize_unknown(team_a_name)
+    safe_team_b_name = normalize_unknown(team_b_name)
+    match_id = build_match_id(match_date, safe_match_title, safe_team_a_name, safe_team_b_name)
+
     clean_events: list[dict] = []
     for event in drop_events:
         cause = safe_str(event.get("cause", ""))
         clean_event = {
             "cause": cause,
-            "drop_type": safe_str(event.get("drop_type", "")),
-            "shot_type": safe_str(event.get("shot_type", "")),
-            "throw_category": safe_str(event.get("throw_category", "")),
-            "throw_detail": safe_str(event.get("throw_detail", "")),
-            "place_side": safe_str(event.get("place_side", "")),
-            "place_end": safe_str(event.get("place_end", "")),
+            "drop_type": normalize_unknown(event.get("drop_type", "")),
+            "shot_type": normalize_unknown(event.get("shot_type", "")),
+            "throw_category": normalize_unknown(event.get("throw_category", "")),
+            "throw_detail": normalize_unknown(event.get("throw_detail", "")),
+            "place_side": normalize_unknown(event.get("place_side", "")),
+            "place_end": normalize_unknown(event.get("place_end", "")),
             "mistake_team": safe_str(event.get("mistake_team", "")),
             "event_team": safe_str(event.get("event_team", "")),
-            "from_player": safe_str(event.get("from_player", "")).strip(),
-            "to_player": safe_str(event.get("to_player", "")).strip(),
-            "defender_name": safe_str(event.get("defender_name", "")).strip(),
-            "nice_defense_type": safe_str(event.get("nice_defense_type", "")).strip(),
+            "from_player": normalize_unknown(event.get("from_player", "")),
+            "to_player": normalize_unknown(event.get("to_player", "")),
+            "defender_name": normalize_unknown(event.get("defender_name", "")),
+            "nice_defense_type": normalize_unknown(event.get("nice_defense_type", "")),
         }
 
         if cause == "ナイスディフェンス":
-            clean_event["drop_type"] = ""
-            clean_event["shot_type"] = ""
-            clean_event["place_side"] = ""
-            clean_event["place_end"] = ""
-            clean_event["from_player"] = ""
-            clean_event["to_player"] = ""
-            clean_event["event_team"] = ""
+            clean_event["drop_type"] = UNKNOWN_VALUE
+            clean_event["shot_type"] = UNKNOWN_VALUE
+            clean_event["place_side"] = UNKNOWN_VALUE
+            clean_event["place_end"] = UNKNOWN_VALUE
+            clean_event["from_player"] = UNKNOWN_VALUE
+            clean_event["to_player"] = UNKNOWN_VALUE
+            clean_event["event_team"] = UNKNOWN_VALUE
         elif cause == "シュート":
-            clean_event["drop_type"] = ""
-            clean_event["mistake_team"] = ""
-            clean_event["defender_name"] = ""
-            clean_event["nice_defense_type"] = ""
+            clean_event["drop_type"] = UNKNOWN_VALUE
+            clean_event["mistake_team"] = UNKNOWN_VALUE
+            clean_event["defender_name"] = UNKNOWN_VALUE
+            clean_event["nice_defense_type"] = UNKNOWN_VALUE
         else:
-            clean_event["shot_type"] = ""
-            clean_event["event_team"] = ""
-            clean_event["defender_name"] = ""
-            clean_event["nice_defense_type"] = ""
+            clean_event["shot_type"] = UNKNOWN_VALUE
+            clean_event["event_team"] = UNKNOWN_VALUE
+            clean_event["defender_name"] = UNKNOWN_VALUE
+            clean_event["nice_defense_type"] = UNKNOWN_VALUE
 
         clean_events.append(clean_event)
 
+    turn_no = len(st.session_state.turns) + 1
     new_turn = {
-        "turn_no": len(st.session_state.turns) + 1,
+        "turn_no": turn_no,
+        "match_id": match_id,
+        "turn_id": build_turn_id(match_id, turn_no),
+        "created_at": created_at,
+        "updated_at": created_at,
+        "input_by": normalize_unknown(input_by),
         "match_date": str(match_date) if match_date is not None else "",
-        "match_title": match_title.strip() if match_title.strip() else "練習試合",
-        "team_a_name": team_a_name.strip() if team_a_name.strip() else "Aチーム",
-        "team_b_name": team_b_name.strip() if team_b_name.strip() else "Bチーム",
+        "match_title": safe_match_title,
+        "team_a_name": safe_team_a_name,
+        "team_b_name": safe_team_b_name,
         "offense_start_team": offense_start_team,
         "point_winner": point_winner,
         "team_a_member": team_a_member,
@@ -565,14 +683,37 @@ def add_turn(
         "team_b_wind": team_b_wind,
         "team_a_defense_type": team_a_defense_type,
         "team_b_defense_type": team_b_defense_type,
-        "score_pattern": score_pattern,
-        "score_from_player": score_from_player.strip(),
-        "score_to_player": score_to_player.strip(),
+        "score_pattern": normalize_unknown(score_pattern),
+        "score_from_player": normalize_unknown(score_from_player),
+        "score_to_player": normalize_unknown(score_to_player),
         "drop_count": len(clean_events),
         "drop_events": clean_events,
         "is_break": point_winner != offense_start_team,
     }
     st.session_state.turns.append(new_turn)
+
+
+def validate_turn_input(score_to_player: str, drop_events: list[dict]) -> list[str]:
+    # 空欄は保存時に「-」へ統一する運用
+    _ = normalize_unknown(score_to_player)
+    for event in drop_events:
+        for key in [
+            "drop_type",
+            "shot_type",
+            "throw_category",
+            "throw_detail",
+            "place_side",
+            "place_end",
+            "from_player",
+            "to_player",
+            "defender_name",
+            "nice_defense_type",
+            "mistake_team",
+            "event_team",
+        ]:
+            event[key] = normalize_unknown(event.get(key, ""))
+
+    return []
 
 
 def collect_turn_events(drop_count: int) -> list[dict]:
@@ -782,6 +923,7 @@ def load_turn_into_edit_state(turn_index: int) -> None:
     st.session_state.edit_match_title = turn.get("match_title", "練習試合")
     st.session_state.edit_team_a_name = turn.get("team_a_name", "Aチーム")
     st.session_state.edit_team_b_name = turn.get("team_b_name", "Bチーム")
+    st.session_state.edit_input_by = turn.get("input_by", UNKNOWN_VALUE)
     st.session_state.edit_offense_start_team = turn.get("offense_start_team", "A")
     st.session_state.edit_point_winner = turn.get("point_winner", "A")
     st.session_state.edit_team_a_member = turn.get("team_a_member", MEMBER_OPTIONS[0])
@@ -816,13 +958,24 @@ def load_turn_into_edit_state(turn_index: int) -> None:
 
 
 def apply_edit_to_turn(turn_index: int) -> None:
+    old_turn = st.session_state.turns[turn_index]
+    match_title = normalize_unknown(st.session_state.edit_match_title)
+    team_a_name = normalize_unknown(st.session_state.edit_team_a_name)
+    team_b_name = normalize_unknown(st.session_state.edit_team_b_name)
+    match_id = build_match_id(st.session_state.edit_match_date, match_title, team_a_name, team_b_name)
+    updated_at = now_iso()
     updated_events = collect_edit_events(int(st.session_state.edit_drop_count))
     updated_turn = {
         "turn_no": turn_index + 1,
+        "match_id": match_id,
+        "turn_id": build_turn_id(match_id, turn_index + 1),
+        "created_at": normalize_unknown(old_turn.get("created_at", updated_at)),
+        "updated_at": updated_at,
+        "input_by": normalize_unknown(st.session_state.get("edit_input_by", st.session_state.get("input_by", UNKNOWN_VALUE))),
         "match_date": str(st.session_state.edit_match_date) if st.session_state.edit_match_date else "",
-        "match_title": safe_str(st.session_state.edit_match_title, "練習試合"),
-        "team_a_name": safe_str(st.session_state.edit_team_a_name, "Aチーム"),
-        "team_b_name": safe_str(st.session_state.edit_team_b_name, "Bチーム"),
+        "match_title": match_title,
+        "team_a_name": team_a_name,
+        "team_b_name": team_b_name,
         "offense_start_team": safe_str(st.session_state.edit_offense_start_team, "A"),
         "point_winner": safe_str(st.session_state.edit_point_winner, "A"),
         "team_a_member": safe_str(st.session_state.edit_team_a_member, MEMBER_OPTIONS[0]),
@@ -833,9 +986,9 @@ def apply_edit_to_turn(turn_index: int) -> None:
         "team_b_wind": safe_str(st.session_state.edit_team_b_wind, WIND_OPTIONS[0]),
         "team_a_defense_type": safe_str(st.session_state.edit_team_a_defense_type, DEFENSE_TYPE_OPTIONS[0]),
         "team_b_defense_type": safe_str(st.session_state.edit_team_b_defense_type, DEFENSE_TYPE_OPTIONS[0]),
-        "score_pattern": safe_str(st.session_state.edit_score_pattern, SCORE_PATTERN_OPTIONS[0]),
-        "score_from_player": safe_str(st.session_state.edit_score_from_player, "").strip(),
-        "score_to_player": safe_str(st.session_state.edit_score_to_player, "").strip(),
+        "score_pattern": normalize_unknown(st.session_state.edit_score_pattern),
+        "score_from_player": normalize_unknown(st.session_state.edit_score_from_player),
+        "score_to_player": normalize_unknown(st.session_state.edit_score_to_player),
         "drop_count": len(updated_events),
         "drop_events": updated_events,
         "is_break": safe_str(st.session_state.edit_point_winner, "A")
@@ -912,6 +1065,7 @@ with st.container(border=True):
     st.text_input("試合タイトル", key="match_title", placeholder="例: 春季リーグ 第2節")
     st.text_input("Aチーム名", key="team_a_name", placeholder="例: 東京アルティメット")
     st.text_input("Bチーム名", key="team_b_name", placeholder="例: 京都アルティメット")
+    st.text_input("入力者", key="input_by", placeholder="例: nakajima（不明なら -）")
 
 with st.container(border=True):
     st.markdown("#### 2) ターン基本情報")
@@ -1029,6 +1183,13 @@ with st.container(border=True):
     col_a, col_b = st.columns(2)
 
 if col_a.button(f"{get_team_label('A')} 得点", use_container_width=True, type="primary"):
+    submit_events = collect_turn_events(drop_count)
+    submit_errors = validate_turn_input(st.session_state.score_to_player, submit_events)
+    if submit_errors:
+        for err in submit_errors:
+            st.error(err)
+        st.stop()
+
     add_turn(
         point_winner="A",
         offense_start_team=st.session_state.offense_start_team,
@@ -1047,13 +1208,21 @@ if col_a.button(f"{get_team_label('A')} 得点", use_container_width=True, type=
         match_title=st.session_state.match_title,
         team_a_name=st.session_state.team_a_name,
         team_b_name=st.session_state.team_b_name,
-        drop_events=collect_turn_events(drop_count),
+        input_by=st.session_state.input_by,
+        drop_events=submit_events,
     )
     sync_turns_to_gsheets_from_state()
     schedule_turn_input_reset()
     st.rerun()
 
 if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type="primary"):
+    submit_events = collect_turn_events(drop_count)
+    submit_errors = validate_turn_input(st.session_state.score_to_player, submit_events)
+    if submit_errors:
+        for err in submit_errors:
+            st.error(err)
+        st.stop()
+
     add_turn(
         point_winner="B",
         offense_start_team=st.session_state.offense_start_team,
@@ -1072,7 +1241,8 @@ if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type=
         match_title=st.session_state.match_title,
         team_a_name=st.session_state.team_a_name,
         team_b_name=st.session_state.team_b_name,
-        drop_events=collect_turn_events(drop_count),
+        input_by=st.session_state.input_by,
+        drop_events=submit_events,
     )
     sync_turns_to_gsheets_from_state()
     schedule_turn_input_reset()
@@ -1119,6 +1289,7 @@ with st.expander("過去ターン修正", expanded=False):
                 st.text_input("試合タイトル", key="edit_match_title")
                 st.text_input("Aチーム名", key="edit_team_a_name")
                 st.text_input("Bチーム名", key="edit_team_b_name")
+                st.text_input("入力者", key="edit_input_by")
 
                 st.radio("ターン開始時のオフェンスチーム", ["A", "B"], horizontal=True, key="edit_offense_start_team")
                 st.radio("得点チーム", ["A", "B"], horizontal=True, key="edit_point_winner")
@@ -1187,6 +1358,13 @@ with st.expander("過去ターン修正", expanded=False):
             if st.button("このターンの修正を保存", type="primary", use_container_width=True):
                 target_index = int(st.session_state.edit_target_turn_no) - 1
                 if 0 <= target_index < len(st.session_state.turns):
+                    edit_events = collect_edit_events(int(st.session_state.edit_drop_count))
+                    edit_errors = validate_turn_input(st.session_state.edit_score_to_player, edit_events)
+                    if edit_errors:
+                        for err in edit_errors:
+                            st.error(err)
+                        st.stop()
+
                     apply_edit_to_turn(target_index)
                     sync_turns_to_gsheets_from_state()
                     st.success(f"ターン {target_index + 1} を更新しました。")
