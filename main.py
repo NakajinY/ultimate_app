@@ -1,5 +1,6 @@
 import json
 import importlib
+from datetime import date
 
 import pandas as pd
 import streamlit as st
@@ -78,6 +79,7 @@ def initialize_state() -> None:
 
 def initialize_input_state() -> None:
     defaults = {
+        "match_date": date.today(),
         "match_title": "練習試合",
         "team_a_name": "Aチーム",
         "team_b_name": "Bチーム",
@@ -194,6 +196,7 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
         records.append(
             {
                 "turn_no": int(row.get("turn_no", len(records) + 1)),
+                "match_date": safe_str(row.get("match_date", "")),
                 "match_title": safe_str(row.get("match_title", "練習試合"), "練習試合"),
                 "team_a_name": safe_str(row.get("team_a_name", "Aチーム"), "Aチーム"),
                 "team_b_name": safe_str(row.get("team_b_name", "Bチーム"), "Bチーム"),
@@ -245,6 +248,7 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
                 "turn_no",
+                "match_date",
                 "match_title",
                 "team_a_name",
                 "team_b_name",
@@ -268,6 +272,7 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
         rows.append(
             {
                 "turn_no": i,
+                "match_date": turn.get("match_date", ""),
                 "match_title": turn.get("match_title", "練習試合"),
                 "team_a_name": turn.get("team_a_name", "Aチーム"),
                 "team_b_name": turn.get("team_b_name", "Bチーム"),
@@ -297,6 +302,7 @@ def add_turn(
     team_b_force: str,
     team_a_defense_type: str,
     team_b_defense_type: str,
+    match_date: object,
     match_title: str,
     team_a_name: str,
     team_b_name: str,
@@ -333,6 +339,7 @@ def add_turn(
 
     new_turn = {
         "turn_no": len(st.session_state.turns) + 1,
+        "match_date": str(match_date) if match_date is not None else "",
         "match_title": match_title.strip() if match_title.strip() else "練習試合",
         "team_a_name": team_a_name.strip() if team_a_name.strip() else "Aチーム",
         "team_b_name": team_b_name.strip() if team_b_name.strip() else "Bチーム",
@@ -479,6 +486,7 @@ elif st.session_state.last_sync_ok is False and st.session_state.last_sync_messa
 
 with st.container(border=True):
     st.markdown("#### 1) 試合情報")
+    st.date_input("試合日", key="match_date")
     st.text_input("試合タイトル", key="match_title", placeholder="例: 春季リーグ 第2節")
     st.text_input("Aチーム名", key="team_a_name", placeholder="例: 東京アルティメット")
     st.text_input("Bチーム名", key="team_b_name", placeholder="例: 京都アルティメット")
@@ -499,7 +507,11 @@ with st.container(border=True):
         DEFENSE_TYPE_OPTIONS,
         key="team_a_defense_type",
     )
-    st.selectbox("フォース", FORCE_OPTIONS, key="team_a_force")
+    st.selectbox(
+        "フォース（TO後）" if st.session_state.offense_start_team == "A" else "フォース",
+        FORCE_OPTIONS,
+        key="team_a_force",
+    )
 
     st.markdown(f"**{get_team_label('B')}**")
     st.selectbox("メンバー", MEMBER_OPTIONS, key="team_b_member")
@@ -508,7 +520,11 @@ with st.container(border=True):
         DEFENSE_TYPE_OPTIONS,
         key="team_b_defense_type",
     )
-    st.selectbox("フォース", FORCE_OPTIONS, key="team_b_force")
+    st.selectbox(
+        "フォース（TO後）" if st.session_state.offense_start_team == "B" else "フォース",
+        FORCE_OPTIONS,
+        key="team_b_force",
+    )
 
 with st.container(border=True):
     st.markdown("#### 3) ターン内イベント")
@@ -585,6 +601,7 @@ if col_a.button(f"{get_team_label('A')} 得点", use_container_width=True, type=
         team_b_force=st.session_state.team_b_force,
         team_a_defense_type=st.session_state.team_a_defense_type,
         team_b_defense_type=st.session_state.team_b_defense_type,
+        match_date=st.session_state.match_date,
         match_title=st.session_state.match_title,
         team_a_name=st.session_state.team_a_name,
         team_b_name=st.session_state.team_b_name,
@@ -604,6 +621,7 @@ if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type=
         team_b_force=st.session_state.team_b_force,
         team_a_defense_type=st.session_state.team_a_defense_type,
         team_b_defense_type=st.session_state.team_b_defense_type,
+        match_date=st.session_state.match_date,
         match_title=st.session_state.match_title,
         team_a_name=st.session_state.team_a_name,
         team_b_name=st.session_state.team_b_name,
@@ -665,11 +683,13 @@ with st.expander("CSVエクスポート/インポート（任意）", expanded=F
         st.session_state.turns = dataframe_to_turns(loaded_df)
         st.rerun()
 
+match_date_display = str(st.session_state.match_date) if st.session_state.match_date else ""
 match_title_display = st.session_state.match_title.strip() or "練習試合"
 team_a_name_display = st.session_state.team_a_name.strip() or "Aチーム"
 team_b_name_display = st.session_state.team_b_name.strip() or "Bチーム"
 
-st.title(f"{match_title_display} - アルティメット記録・分析")
+title_prefix = f"{match_date_display} " if match_date_display else ""
+st.title(f"{title_prefix}{match_title_display} - アルティメット記録・分析")
 
 st.subheader("現在の入力プレビュー")
 preview_events = collect_turn_events(drop_count)
@@ -705,7 +725,10 @@ if "team_b_name" in df.columns:
 if "match_title" in df.columns:
     match_title_display = safe_str(df.iloc[-1].get("match_title", match_title_display), match_title_display)
 
-st.caption(f"試合: {match_title_display}")
+if "match_date" in df.columns:
+    match_date_display = safe_str(df.iloc[-1].get("match_date", match_date_display), match_date_display)
+
+st.caption(f"試合: {match_date_display} {match_title_display}".strip())
 
 df["A_score"] = (df["point_winner"] == "A").cumsum()
 df["B_score"] = (df["point_winner"] == "B").cumsum()
