@@ -27,6 +27,7 @@ THROW_DETAIL_OPTIONS = {
 }
 PLACE_SIDE_OPTIONS = ["ハメ側", "アンハメ側"]
 PLACE_END_OPTIONS = ["エンド前", "Not"]
+SCORE_PATTERN_OPTIONS = ["シュートがドーン", "ミート、展開コツコツ", "TOからの速攻"]
 GSHEETS_WORKSHEET = "turn_log"
 
 
@@ -91,6 +92,9 @@ def initialize_input_state() -> None:
         "team_a_defense_type": DEFENSE_TYPE_OPTIONS[0],
         "team_b_defense_type": DEFENSE_TYPE_OPTIONS[0],
         "drop_count": 0,
+        "score_pattern": SCORE_PATTERN_OPTIONS[0],
+        "score_from_player": "",
+        "score_to_player": "",
         "pending_turn_input_reset": False,
     }
     for key, value in defaults.items():
@@ -107,6 +111,9 @@ def reset_turn_inputs() -> None:
     st.session_state.team_a_defense_type = DEFENSE_TYPE_OPTIONS[0]
     st.session_state.team_b_defense_type = DEFENSE_TYPE_OPTIONS[0]
     st.session_state.drop_count = 0
+    st.session_state.score_pattern = SCORE_PATTERN_OPTIONS[0]
+    st.session_state.score_from_player = ""
+    st.session_state.score_to_player = ""
 
     for key in list(st.session_state.keys()):
         if key.startswith("event_"):
@@ -230,6 +237,9 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
                 "team_b_defense_type": safe_str(
                     row.get("team_b_defense_type", row.get("defense_type", "マンツー")), "マンツー"
                 ),
+                "score_pattern": safe_str(row.get("score_pattern", "")),
+                "score_from_player": safe_str(row.get("score_from_player", "")),
+                "score_to_player": safe_str(row.get("score_to_player", "")),
                 "drop_count": len(events),
                 "drop_events": events,
                 "drop_events_json": json.dumps(events, ensure_ascii=False),
@@ -260,6 +270,9 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
                 "team_b_force",
                 "team_a_defense_type",
                 "team_b_defense_type",
+                "score_pattern",
+                "score_from_player",
+                "score_to_player",
                 "drop_count",
                 "drop_events_json",
                 "is_break",
@@ -284,6 +297,9 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
                 "team_b_force": turn.get("team_b_force", "サイド"),
                 "team_a_defense_type": turn.get("team_a_defense_type", "マンツー"),
                 "team_b_defense_type": turn.get("team_b_defense_type", "マンツー"),
+                "score_pattern": turn.get("score_pattern", ""),
+                "score_from_player": turn.get("score_from_player", ""),
+                "score_to_player": turn.get("score_to_player", ""),
                 "drop_count": len(events),
                 "drop_events_json": json.dumps(events, ensure_ascii=False),
                 "is_break": turn.get("is_break", False),
@@ -302,6 +318,9 @@ def add_turn(
     team_b_force: str,
     team_a_defense_type: str,
     team_b_defense_type: str,
+    score_pattern: str,
+    score_from_player: str,
+    score_to_player: str,
     match_date: object,
     match_title: str,
     team_a_name: str,
@@ -351,6 +370,9 @@ def add_turn(
         "team_b_force": team_b_force,
         "team_a_defense_type": team_a_defense_type,
         "team_b_defense_type": team_b_defense_type,
+        "score_pattern": score_pattern,
+        "score_from_player": score_from_player.strip(),
+        "score_to_player": score_to_player.strip(),
         "drop_count": len(clean_events),
         "drop_events": clean_events,
         "is_break": point_winner != offense_start_team,
@@ -589,6 +611,10 @@ for i in range(drop_count):
 
 with st.container(border=True):
     st.markdown("#### 4) 得点入力（1ターン=1得点）")
+    st.selectbox("得点の取り方", SCORE_PATTERN_OPTIONS, key="score_pattern")
+    score_pass_col1, score_pass_col2 = st.columns(2)
+    score_pass_col1.text_input("誰から", key="score_from_player", placeholder="例: そう")
+    score_pass_col2.text_input("誰へ（得点者）", key="score_to_player", placeholder="例: かない")
     col_a, col_b = st.columns(2)
 
 if col_a.button(f"{get_team_label('A')} 得点", use_container_width=True, type="primary"):
@@ -601,6 +627,9 @@ if col_a.button(f"{get_team_label('A')} 得点", use_container_width=True, type=
         team_b_force=st.session_state.team_b_force,
         team_a_defense_type=st.session_state.team_a_defense_type,
         team_b_defense_type=st.session_state.team_b_defense_type,
+        score_pattern=st.session_state.score_pattern,
+        score_from_player=st.session_state.score_from_player,
+        score_to_player=st.session_state.score_to_player,
         match_date=st.session_state.match_date,
         match_title=st.session_state.match_title,
         team_a_name=st.session_state.team_a_name,
@@ -621,6 +650,9 @@ if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type=
         team_b_force=st.session_state.team_b_force,
         team_a_defense_type=st.session_state.team_a_defense_type,
         team_b_defense_type=st.session_state.team_b_defense_type,
+        score_pattern=st.session_state.score_pattern,
+        score_from_player=st.session_state.score_from_player,
+        score_to_player=st.session_state.score_to_player,
         match_date=st.session_state.match_date,
         match_title=st.session_state.match_title,
         team_a_name=st.session_state.team_a_name,
@@ -708,6 +740,11 @@ preview_col1.write(
     f"- {team_b_name_display}: メンバー={st.session_state.team_b_member} / D={st.session_state.team_b_defense_type}{'（TO後）' if st.session_state.offense_start_team == 'B' else ''} / フォース={st.session_state.team_b_force}"
 )
 preview_col2.write(f"- イベント数: {drop_count}")
+preview_col2.write(f"- 得点パターン: {st.session_state.score_pattern}")
+score_route_preview = " -> ".join(
+    [x for x in [st.session_state.score_from_player.strip(), st.session_state.score_to_player.strip()] if x]
+)
+preview_col2.write(f"- 得点ルート: {score_route_preview if score_route_preview else '未入力'}")
 
 if preview_events_df.empty:
     st.caption("このターンのイベント入力はありません。")
@@ -750,6 +787,42 @@ break_b = int(((df["point_winner"] == "B") & (df["is_break"])).sum())
 c1, c2 = st.columns(2)
 c1.metric(f"{team_a_name_display}のブレイク数", break_a)
 c2.metric(f"{team_b_name_display}のブレイク数", break_b)
+
+st.subheader("得点パターン分析")
+score_left, score_right = st.columns(2)
+with score_left:
+    if "score_pattern" in df.columns and not df["score_pattern"].dropna().empty:
+        st.dataframe(
+            df[df["score_pattern"].astype(str).str.strip() != ""]["score_pattern"]
+            .value_counts()
+            .rename_axis("score_pattern")
+            .reset_index(name="count"),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.write("得点パターン記録はまだありません。")
+
+with score_right:
+    if {"score_pattern", "score_from_player", "score_to_player"}.issubset(df.columns):
+        fast_break_df = df[df["score_pattern"] == "TOからの速攻"].copy()
+        fast_break_df = fast_break_df[
+            (fast_break_df["score_from_player"].astype(str).str.strip() != "")
+            & (fast_break_df["score_to_player"].astype(str).str.strip() != "")
+        ]
+        if fast_break_df.empty:
+            st.write("TOからの速攻（誰→誰）の記録はまだありません。")
+        else:
+            fast_break_df["route"] = (
+                fast_break_df["score_from_player"].astype(str).str.strip()
+                + " -> "
+                + fast_break_df["score_to_player"].astype(str).str.strip()
+            )
+            st.dataframe(
+                fast_break_df["route"].value_counts().rename_axis("route").reset_index(name="count"),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 st.subheader("Oセット キープ率")
 keep_col1, keep_col2 = st.columns(2)
@@ -878,6 +951,9 @@ show_df = df[
         "team_b_member",
         "team_b_defense_type",
         "team_b_force",
+        "score_pattern",
+        "score_from_player",
+        "score_to_player",
         "drop_count",
         "A_score",
         "B_score",
@@ -898,6 +974,9 @@ show_df = show_df.rename(
         "team_b_member": f"{team_b_name_display}_メンバー",
         "team_b_defense_type": f"{team_b_name_display}_Dタイプ",
         "team_b_force": f"{team_b_name_display}_フォース",
+        "score_pattern": "得点の取り方",
+        "score_from_player": "誰から",
+        "score_to_player": "誰へ（得点者）",
     }
 )
 show_df = show_df.rename(columns={"A_score": team_a_name_display, "B_score": team_b_name_display})
