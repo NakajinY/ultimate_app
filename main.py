@@ -1,5 +1,5 @@
 import json
-from pathlib import Path
+import importlib
 
 import pandas as pd
 import streamlit as st
@@ -26,9 +26,7 @@ THROW_DETAIL_OPTIONS = {
 }
 PLACE_SIDE_OPTIONS = ["ハメ側", "アンハメ側"]
 PLACE_END_OPTIONS = ["エンド前", "Not"]
-
-DATA_DIR = Path(__file__).parent / "data"
-CSV_PATH = DATA_DIR / "turn_log.csv"
+GSHEETS_WORKSHEET = "turn_log"
 
 
 def parse_bool(value: object) -> bool:
@@ -70,6 +68,12 @@ def get_team_label(code: str) -> str:
 def initialize_state() -> None:
     if "turns" not in st.session_state:
         st.session_state.turns = []
+    if "gsheets_bootstrapped" not in st.session_state:
+        st.session_state.gsheets_bootstrapped = False
+    if "last_sync_ok" not in st.session_state:
+        st.session_state.last_sync_ok = None
+    if "last_sync_message" not in st.session_state:
+        st.session_state.last_sync_message = ""
 
 
 def initialize_input_state() -> None:
@@ -109,6 +113,53 @@ def reset_turn_inputs() -> None:
 
 def schedule_turn_input_reset() -> None:
     st.session_state.pending_turn_input_reset = True
+
+
+def get_gsheets_connection():
+    try:
+        gsheets_module = importlib.import_module("streamlit_gsheets")
+        gsheets_connection_class = getattr(gsheets_module, "GSheetsConnection")
+        return st.connection("gsheets", type=gsheets_connection_class)
+    except Exception:
+        return None
+
+
+def load_turns_from_gsheets() -> tuple[bool, str]:
+    conn = get_gsheets_connection()
+    if conn is None:
+        return False, "Google Sheets接続が見つかりません。設定または依存パッケージを確認してください。"
+
+    try:
+        loaded_df = conn.read(worksheet=GSHEETS_WORKSHEET, ttl=0)
+        if loaded_df is None or loaded_df.empty:
+            st.session_state.turns = []
+            return True, "Google Sheetsは空です。"
+
+        loaded_df = loaded_df.loc[:, ~loaded_df.columns.astype(str).str.startswith("Unnamed:")]
+        st.session_state.turns = dataframe_to_turns(loaded_df)
+        return True, f"Google Sheets（{GSHEETS_WORKSHEET}）を読み込みました。"
+    except Exception as e:
+        return False, f"Google Sheets読込に失敗しました: {e}"
+
+
+def save_turns_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
+    conn = get_gsheets_connection()
+    if conn is None:
+        return False, "Google Sheets接続が見つかりません。設定または依存パッケージを確認してください。"
+
+    try:
+        conn.update(worksheet=GSHEETS_WORKSHEET, data=df)
+        return True, f"Google Sheets（{GSHEETS_WORKSHEET}）へ保存しました。"
+    except Exception as e:
+        return False, f"Google Sheets保存に失敗しました: {e}"
+
+
+def sync_turns_to_gsheets_from_state() -> tuple[bool, str]:
+    df = turns_to_dataframe(st.session_state.turns)
+    ok, msg = save_turns_to_gsheets(df)
+    st.session_state.last_sync_ok = ok
+    st.session_state.last_sync_message = msg
+    return ok, msg
 
 
 def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
@@ -365,11 +416,6 @@ def collect_turn_events(drop_count: int) -> list[dict]:
     return events
 
 
-def save_csv(df: pd.DataFrame) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-
-
 def build_events_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict] = []
     for _, row in df.iterrows():
@@ -397,6 +443,12 @@ def build_events_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 initialize_state()
 initialize_input_state()
 
+if not st.session_state.gsheets_bootstrapped:
+    ok, msg = load_turns_from_gsheets()
+    st.session_state.last_sync_ok = ok
+    st.session_state.last_sync_message = msg
+    st.session_state.gsheets_bootstrapped = True
+
 # ウィジェットを描画する前にリセット予約を処理する
 if st.session_state.pending_turn_input_reset:
     reset_turn_inputs()
@@ -419,6 +471,11 @@ st.markdown(
 )
 
 st.subheader("入力（スマホ最適化）")
+
+if st.session_state.last_sync_ok is True and st.session_state.last_sync_message:
+    st.caption(f"同期状態: {st.session_state.last_sync_message}")
+elif st.session_state.last_sync_ok is False and st.session_state.last_sync_message:
+    st.warning(st.session_state.last_sync_message)
 
 with st.container(border=True):
     st.markdown("#### 1) 試合情報")
@@ -533,6 +590,7 @@ if col_a.button(f"{get_team_label('A')} 得点", use_container_width=True, type=
         team_b_name=st.session_state.team_b_name,
         drop_events=collect_turn_events(drop_count),
     )
+    sync_turns_to_gsheets_from_state()
     schedule_turn_input_reset()
     st.rerun()
 
@@ -551,6 +609,7 @@ if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type=
         team_b_name=st.session_state.team_b_name,
         drop_events=collect_turn_events(drop_count),
     )
+    sync_turns_to_gsheets_from_state()
     schedule_turn_input_reset()
     st.rerun()
 
@@ -560,30 +619,37 @@ with st.container(border=True):
     if op1.button("直前ターンを削除", use_container_width=True):
         if st.session_state.turns:
             st.session_state.turns.pop()
+            sync_turns_to_gsheets_from_state()
         st.rerun()
 
     if op2.button("全データをリセット", use_container_width=True):
         st.session_state.turns = []
-        if CSV_PATH.exists():
-            CSV_PATH.unlink()
-        st.success("セッションデータと保存CSVをリセットしました。")
+        sync_turns_to_gsheets_from_state()
+        st.success("セッションデータをリセットし、Google Sheetsへ反映しました。")
         st.rerun()
 
 df = turns_to_dataframe(st.session_state.turns)
 
-with st.expander("保存・読込", expanded=False):
-    if st.button("CSVに保存", use_container_width=True):
-        save_csv(df)
-        st.success(f"保存しました: {CSV_PATH.name}")
+with st.expander("Google Sheets連携", expanded=False):
+    st.caption("Streamlit公開URLからの入力は、得点/削除/リセット時に自動でGoogle Sheetsへ同期されます。")
+    if st.button("Google Sheetsに保存", use_container_width=True):
+        ok, msg = sync_turns_to_gsheets_from_state()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
 
-    if st.button("保存済みCSVを読み込む", use_container_width=True):
-        if CSV_PATH.exists():
-            loaded_df = pd.read_csv(CSV_PATH)
-            st.session_state.turns = dataframe_to_turns(loaded_df)
-            st.success(f"読み込みました: {CSV_PATH.name}")
+    if st.button("Google Sheetsから読み込む", use_container_width=True):
+        ok, msg = load_turns_from_gsheets()
+        st.session_state.last_sync_ok = ok
+        st.session_state.last_sync_message = msg
+        if ok:
+            st.success(msg)
             st.rerun()
         else:
-            st.info("保存済みCSVが見つかりません。")
+            st.error(msg)
+
+with st.expander("CSVエクスポート/インポート（任意）", expanded=False):
 
     st.download_button(
         label="CSVをダウンロード",
