@@ -5,3 +5,5 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
+.streamlit/secrets.toml
+.ultimate-analsys-app-9e9950572a35.json
