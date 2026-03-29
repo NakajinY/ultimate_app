@@ -13,22 +13,25 @@ DEFENSE_LINEUP_OPTIONS = ["Dセット", "上げマンD", "上げゾーンD","-"]
 MEMBER_OPTIONS = OFFENSE_LINEUP_OPTIONS + DEFENSE_LINEUP_OPTIONS
 FORCE_OPTIONS = ["サイド", "バック","FM","-"]
 DEFENSE_TYPE_OPTIONS = ["マンツー", "ゾーン","-"]
-EVENT_CAUSE_OPTIONS = ["ミス", "ナイスディフェンス"]
-NICE_DEFENSE_TYPE_OPTIONS = ["ストブロ", "ミート狩り", "シュート狩り"]
+WIND_OPTIONS = ["-","追い風", "横風", "向かい風","無風"]
+EVENT_TYPE_OPTIONS = ["ミス", "ナイスディフェンス", "シュート"]
+NICE_DEFENSE_TYPE_OPTIONS = ["ストブロ/アウト", "ミート狩り", "シュート狩り"]
 DROP_TYPE_OPTIONS = [
     "キャッチミス",
     "スローミス",
 ]
+SHOT_TYPE_OPTIONS = ["ストレート", "ボンバー", "裏シュート","対角シュート"]
 THROW_CATEGORY_OPTIONS = ["ミート", "シュート", "ハンド展開"]
 THROW_DETAIL_OPTIONS = {
     "ミート": ["インサイ", "オープン"],
     "シュート": ["ストレート", "ボンバー", "裏シュート","対角シュート"],
-    "ハンド展開": ["インサイド", "裏", "オープン", "かけ上がり"],
+    "ハンド展開": ["インサイド", "裏", "オープン", "かけ上がり","ダンプ"],
 }
 PLACE_SIDE_OPTIONS = ["ハメ側","真ん中", "アンハメ側"]
-PLACE_END_OPTIONS = ["エンド前", "Not"]
+PLACE_END_OPTIONS = ["序盤", "中盤", "エンド前"]
 SCORE_PATTERN_OPTIONS = ["シュートがドーン", "ミート、展開コツコツ", "TOからの速攻"]
 GSHEETS_WORKSHEET = "turn_log"
+GSHEETS_EVENTS_WORKSHEET = "event_log"
 
 
 def parse_bool(value: object) -> bool:
@@ -67,6 +70,21 @@ def get_team_label(code: str) -> str:
     return team_a if code == "A" else team_b
 
 
+def team_name_from_code(code: str, team_a_name: str, team_b_name: str) -> str:
+    return team_a_name if code == "A" else team_b_name
+
+
+def normalize_team_code(value: object, team_a_name: str, team_b_name: str, default: str = "A") -> str:
+    text = safe_str(value, default).strip()
+    if text in {"A", "B"}:
+        return text
+    if text == team_a_name:
+        return "A"
+    if text == team_b_name:
+        return "B"
+    return default
+
+
 def initialize_state() -> None:
     if "turns" not in st.session_state:
         st.session_state.turns = []
@@ -89,6 +107,8 @@ def initialize_input_state() -> None:
         "team_b_member": MEMBER_OPTIONS[2],
         "team_a_force": FORCE_OPTIONS[0],
         "team_b_force": FORCE_OPTIONS[0],
+        "team_a_wind": WIND_OPTIONS[0],
+        "team_b_wind": WIND_OPTIONS[0],
         "team_a_defense_type": DEFENSE_TYPE_OPTIONS[0],
         "team_b_defense_type": DEFENSE_TYPE_OPTIONS[0],
         "drop_count": 0,
@@ -108,6 +128,8 @@ def reset_turn_inputs() -> None:
     st.session_state.team_b_member = MEMBER_OPTIONS[2]
     st.session_state.team_a_force = FORCE_OPTIONS[0]
     st.session_state.team_b_force = FORCE_OPTIONS[0]
+    st.session_state.team_a_wind = WIND_OPTIONS[0]
+    st.session_state.team_b_wind = WIND_OPTIONS[0]
     st.session_state.team_a_defense_type = DEFENSE_TYPE_OPTIONS[0]
     st.session_state.team_b_defense_type = DEFENSE_TYPE_OPTIONS[0]
     st.session_state.drop_count = 0
@@ -158,7 +180,9 @@ def save_turns_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 
     try:
         conn.update(worksheet=GSHEETS_WORKSHEET, data=df)
-        return True, f"Google Sheets（{GSHEETS_WORKSHEET}）へ保存しました。"
+        event_df = build_event_export_dataframe(st.session_state.turns)
+        conn.update(worksheet=GSHEETS_EVENTS_WORKSHEET, data=event_df)
+        return True, f"Google Sheets（{GSHEETS_WORKSHEET} / {GSHEETS_EVENTS_WORKSHEET}）へ保存しました。"
     except Exception as e:
         return False, f"Google Sheets保存に失敗しました: {e}"
 
@@ -169,6 +193,132 @@ def sync_turns_to_gsheets_from_state() -> tuple[bool, str]:
     st.session_state.last_sync_ok = ok
     st.session_state.last_sync_message = msg
     return ok, msg
+
+
+def build_event_export_dataframe(turns: list[dict]) -> pd.DataFrame:
+    columns = [
+        "turn_no",
+        "match_date",
+        "match_title",
+        "team_a_name",
+        "team_b_name",
+        "event_type",
+        "team",
+        "wind_direction",
+        "defense_type",
+        "force",
+        "drop_type",
+        "shot_type",
+        "throw_category",
+        "throw_detail",
+        "place_side",
+        "place_end",
+        "from_player",
+        "to_player",
+        "defender_name",
+        "nice_defense_type",
+    ]
+
+    rows: list[dict] = []
+    for i, turn in enumerate(turns, start=1):
+        events = turn.get("drop_events", [])
+        team_a_name = safe_str(turn.get("team_a_name", "Aチーム"), "Aチーム")
+        team_b_name = safe_str(turn.get("team_b_name", "Bチーム"), "Bチーム")
+        team_a_wind = safe_str(turn.get("team_a_wind", ""))
+        team_b_wind = safe_str(turn.get("team_b_wind", ""))
+
+        # 得点イベント（1ターン=1得点）
+        point_winner_code = normalize_team_code(turn.get("point_winner", "A"), team_a_name, team_b_name, "A")
+        score_team_name = team_name_from_code(point_winner_code, team_a_name, team_b_name)
+        score_wind = team_a_wind if point_winner_code == "A" else team_b_wind
+        rows.append(
+            {
+                "turn_no": i,
+                "match_date": safe_str(turn.get("match_date", "")),
+                "match_title": safe_str(turn.get("match_title", "")),
+                "team_a_name": team_a_name,
+                "team_b_name": team_b_name,
+                "event_type": "得点",
+                "team": score_team_name,
+                "wind_direction": score_wind,
+                "defense_type": "",
+                "force": "",
+                "drop_type": "",
+                "shot_type": "",
+                "throw_category": "",
+                "throw_detail": "",
+                "place_side": "",
+                "place_end": "",
+                "from_player": safe_str(turn.get("score_from_player", "")),
+                "to_player": safe_str(turn.get("score_to_player", "")),
+                "defender_name": "",
+                "nice_defense_type": "",
+            }
+        )
+
+        for event in events:
+            event_type = safe_str(event.get("cause", ""))
+            mistake_team_code = normalize_team_code(
+                event.get("mistake_team", ""),
+                team_a_name,
+                team_b_name,
+                "",
+            )
+
+            event_team_code = ""
+            if event_type in {"ミス", "ナイスディフェンス"}:
+                event_team_code = mistake_team_code
+            elif event_type == "シュート":
+                event_team_code = normalize_team_code(
+                    event.get("event_team", ""),
+                    team_a_name,
+                    team_b_name,
+                    "",
+                )
+
+            if event_team_code == "A":
+                defense_type = safe_str(turn.get("team_a_defense_type", ""))
+                force = safe_str(turn.get("team_a_force", ""))
+                wind_direction = team_a_wind
+            elif event_team_code == "B":
+                defense_type = safe_str(turn.get("team_b_defense_type", ""))
+                force = safe_str(turn.get("team_b_force", ""))
+                wind_direction = team_b_wind
+            else:
+                defense_type = ""
+                force = ""
+                wind_direction = ""
+
+            rows.append(
+                {
+                    "turn_no": i,
+                    "match_date": safe_str(turn.get("match_date", "")),
+                    "match_title": safe_str(turn.get("match_title", "")),
+                    "team_a_name": team_a_name,
+                    "team_b_name": team_b_name,
+                    "event_type": event_type,
+                    "team": team_name_from_code(event_team_code, team_a_name, team_b_name)
+                    if event_team_code in {"A", "B"}
+                    else "",
+                    "wind_direction": wind_direction,
+                    "defense_type": defense_type,
+                    "force": force,
+                    "drop_type": safe_str(event.get("drop_type", "")),
+                    "shot_type": safe_str(event.get("shot_type", "")),
+                    "throw_category": safe_str(event.get("throw_category", "")),
+                    "throw_detail": safe_str(event.get("throw_detail", "")),
+                    "place_side": safe_str(event.get("place_side", "")),
+                    "place_end": safe_str(event.get("place_end", "")),
+                    "from_player": safe_str(event.get("from_player", "")),
+                    "to_player": safe_str(event.get("to_player", "")),
+                    "defender_name": safe_str(event.get("defender_name", "")),
+                    "nice_defense_type": safe_str(event.get("nice_defense_type", "")),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
 
 
 def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
@@ -188,11 +338,13 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
                     {
                         "cause": "ミス",
                         "drop_type": safe_str(row.get("drop_type", "")),
+                        "shot_type": "",
                         "throw_category": "",
                         "throw_detail": "",
                         "place_side": "",
                         "place_end": "",
                         "mistake_team": safe_str(row.get("mistake_team", "")),
+                        "event_team": "",
                         "from_player": safe_str(row.get("from_player", "")),
                         "to_player": safe_str(row.get("to_player", "")),
                         "defender_name": "",
@@ -207,8 +359,18 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
                 "match_title": safe_str(row.get("match_title", "練習試合"), "練習試合"),
                 "team_a_name": safe_str(row.get("team_a_name", "Aチーム"), "Aチーム"),
                 "team_b_name": safe_str(row.get("team_b_name", "Bチーム"), "Bチーム"),
-                "offense_start_team": safe_str(row.get("offense_start_team", "A"), "A"),
-                "point_winner": safe_str(row.get("point_winner", "A"), "A"),
+                "offense_start_team": normalize_team_code(
+                    row.get("offense_start_team", "A"),
+                    safe_str(row.get("team_a_name", "Aチーム"), "Aチーム"),
+                    safe_str(row.get("team_b_name", "Bチーム"), "Bチーム"),
+                    "A",
+                ),
+                "point_winner": normalize_team_code(
+                    row.get("point_winner", "A"),
+                    safe_str(row.get("team_a_name", "Aチーム"), "Aチーム"),
+                    safe_str(row.get("team_b_name", "Bチーム"), "Bチーム"),
+                    "A",
+                ),
                 "team_a_member": safe_str(
                     row.get(
                         "team_a_member",
@@ -231,6 +393,8 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
                 ),
                 "team_a_force": safe_str(row.get("team_a_force", row.get("force", "サイド")), "サイド"),
                 "team_b_force": safe_str(row.get("team_b_force", row.get("force", "サイド")), "サイド"),
+                "team_a_wind": safe_str(row.get("team_a_wind", WIND_OPTIONS[0]), WIND_OPTIONS[0]),
+                "team_b_wind": safe_str(row.get("team_b_wind", WIND_OPTIONS[0]), WIND_OPTIONS[0]),
                 "team_a_defense_type": safe_str(
                     row.get("team_a_defense_type", row.get("defense_type", "マンツー")), "マンツー"
                 ),
@@ -263,11 +427,15 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
                 "team_a_name",
                 "team_b_name",
                 "offense_start_team",
+                "offense_start_team_name",
                 "point_winner",
+                "point_winner_name",
                 "team_a_member",
                 "team_b_member",
                 "team_a_force",
                 "team_b_force",
+                "team_a_wind",
+                "team_b_wind",
                 "team_a_defense_type",
                 "team_b_defense_type",
                 "score_pattern",
@@ -290,11 +458,23 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
                 "team_a_name": turn.get("team_a_name", "Aチーム"),
                 "team_b_name": turn.get("team_b_name", "Bチーム"),
                 "offense_start_team": turn.get("offense_start_team", "A"),
+                "offense_start_team_name": team_name_from_code(
+                    turn.get("offense_start_team", "A"),
+                    turn.get("team_a_name", "Aチーム"),
+                    turn.get("team_b_name", "Bチーム"),
+                ),
                 "point_winner": turn.get("point_winner", "A"),
+                "point_winner_name": team_name_from_code(
+                    turn.get("point_winner", "A"),
+                    turn.get("team_a_name", "Aチーム"),
+                    turn.get("team_b_name", "Bチーム"),
+                ),
                 "team_a_member": turn.get("team_a_member", "Oセット"),
                 "team_b_member": turn.get("team_b_member", "Dセット"),
                 "team_a_force": turn.get("team_a_force", "サイド"),
                 "team_b_force": turn.get("team_b_force", "サイド"),
+                "team_a_wind": turn.get("team_a_wind", WIND_OPTIONS[0]),
+                "team_b_wind": turn.get("team_b_wind", WIND_OPTIONS[0]),
                 "team_a_defense_type": turn.get("team_a_defense_type", "マンツー"),
                 "team_b_defense_type": turn.get("team_b_defense_type", "マンツー"),
                 "score_pattern": turn.get("score_pattern", ""),
@@ -316,6 +496,8 @@ def add_turn(
     team_b_member: str,
     team_a_force: str,
     team_b_force: str,
+    team_a_wind: str,
+    team_b_wind: str,
     team_a_defense_type: str,
     team_b_defense_type: str,
     score_pattern: str,
@@ -333,11 +515,13 @@ def add_turn(
         clean_event = {
             "cause": cause,
             "drop_type": safe_str(event.get("drop_type", "")),
+            "shot_type": safe_str(event.get("shot_type", "")),
             "throw_category": safe_str(event.get("throw_category", "")),
             "throw_detail": safe_str(event.get("throw_detail", "")),
             "place_side": safe_str(event.get("place_side", "")),
             "place_end": safe_str(event.get("place_end", "")),
             "mistake_team": safe_str(event.get("mistake_team", "")),
+            "event_team": safe_str(event.get("event_team", "")),
             "from_player": safe_str(event.get("from_player", "")).strip(),
             "to_player": safe_str(event.get("to_player", "")).strip(),
             "defender_name": safe_str(event.get("defender_name", "")).strip(),
@@ -346,11 +530,20 @@ def add_turn(
 
         if cause == "ナイスディフェンス":
             clean_event["drop_type"] = ""
+            clean_event["shot_type"] = ""
             clean_event["place_side"] = ""
             clean_event["place_end"] = ""
             clean_event["from_player"] = ""
             clean_event["to_player"] = ""
+            clean_event["event_team"] = ""
+        elif cause == "シュート":
+            clean_event["drop_type"] = ""
+            clean_event["mistake_team"] = ""
+            clean_event["defender_name"] = ""
+            clean_event["nice_defense_type"] = ""
         else:
+            clean_event["shot_type"] = ""
+            clean_event["event_team"] = ""
             clean_event["defender_name"] = ""
             clean_event["nice_defense_type"] = ""
 
@@ -368,6 +561,8 @@ def add_turn(
         "team_b_member": team_b_member,
         "team_a_force": team_a_force,
         "team_b_force": team_b_force,
+        "team_a_wind": team_a_wind,
+        "team_b_wind": team_b_wind,
         "team_a_defense_type": team_a_defense_type,
         "team_b_defense_type": team_b_defense_type,
         "score_pattern": score_pattern,
@@ -383,9 +578,9 @@ def add_turn(
 def collect_turn_events(drop_count: int) -> list[dict]:
     events: list[dict] = []
     for i in range(drop_count):
-        cause = safe_str(st.session_state.get(f"event_{i}_cause", "ミス"), "ミス")
-        drop_team = safe_str(st.session_state.get(f"event_{i}_drop_team", "A"), "A")
-        if cause == "ナイスディフェンス":
+        event_type = safe_str(st.session_state.get(f"event_{i}_cause", "ミス"), "ミス")
+        event_team = safe_str(st.session_state.get(f"event_{i}_drop_team", "A"), "A")
+        if event_type == "ナイスディフェンス":
             throw_category = safe_str(
                 st.session_state.get(f"event_{i}_throw_category", THROW_CATEGORY_OPTIONS[0]),
                 THROW_CATEGORY_OPTIONS[0],
@@ -393,8 +588,9 @@ def collect_turn_events(drop_count: int) -> list[dict]:
             throw_detail_options = THROW_DETAIL_OPTIONS.get(throw_category, ["-"])
             events.append(
                 {
-                    "cause": cause,
+                    "cause": event_type,
                     "drop_type": "",
+                    "shot_type": "",
                     "throw_category": throw_category,
                     "throw_detail": safe_str(
                         st.session_state.get(f"event_{i}_throw_detail", throw_detail_options[0]),
@@ -402,7 +598,8 @@ def collect_turn_events(drop_count: int) -> list[dict]:
                     ),
                     "place_side": "",
                     "place_end": "",
-                    "mistake_team": drop_team,
+                    "mistake_team": event_team,
+                    "event_team": "",
                     "from_player": "",
                     "to_player": "",
                     "defender_name": safe_str(st.session_state.get(f"event_{i}_defender_name", "")),
@@ -410,6 +607,33 @@ def collect_turn_events(drop_count: int) -> list[dict]:
                         st.session_state.get(f"event_{i}_nice_defense_type", NICE_DEFENSE_TYPE_OPTIONS[0]),
                         NICE_DEFENSE_TYPE_OPTIONS[0],
                     ),
+                }
+            )
+        elif event_type == "シュート":
+            events.append(
+                {
+                    "cause": "シュート",
+                    "drop_type": "",
+                    "shot_type": safe_str(
+                        st.session_state.get(f"event_{i}_shot_type", SHOT_TYPE_OPTIONS[0]),
+                        SHOT_TYPE_OPTIONS[0],
+                    ),
+                    "throw_category": "",
+                    "throw_detail": "",
+                    "place_side": safe_str(
+                        st.session_state.get(f"event_{i}_place_side", PLACE_SIDE_OPTIONS[0]),
+                        PLACE_SIDE_OPTIONS[0],
+                    ),
+                    "place_end": safe_str(
+                        st.session_state.get(f"event_{i}_place_end", PLACE_END_OPTIONS[0]),
+                        PLACE_END_OPTIONS[0],
+                    ),
+                    "mistake_team": "",
+                    "event_team": event_team,
+                    "from_player": safe_str(st.session_state.get(f"event_{i}_from_player", "")),
+                    "to_player": safe_str(st.session_state.get(f"event_{i}_to_player", "")),
+                    "defender_name": "",
+                    "nice_defense_type": "",
                 }
             )
         else:
@@ -422,6 +646,7 @@ def collect_turn_events(drop_count: int) -> list[dict]:
                 {
                     "cause": "ミス",
                     "drop_type": safe_str(st.session_state.get(f"event_{i}_drop_type", "")),
+                    "shot_type": "",
                     "throw_category": throw_category,
                     "throw_detail": safe_str(
                         st.session_state.get(f"event_{i}_throw_detail", throw_detail_options[0]),
@@ -435,7 +660,8 @@ def collect_turn_events(drop_count: int) -> list[dict]:
                         st.session_state.get(f"event_{i}_place_end", PLACE_END_OPTIONS[0]),
                         PLACE_END_OPTIONS[0],
                     ),
-                    "mistake_team": drop_team,
+                    "mistake_team": event_team,
+                    "event_team": "",
                     "from_player": safe_str(st.session_state.get(f"event_{i}_from_player", "")),
                     "to_player": safe_str(st.session_state.get(f"event_{i}_to_player", "")),
                     "defender_name": "",
@@ -448,9 +674,9 @@ def collect_turn_events(drop_count: int) -> list[dict]:
 def collect_edit_events(edit_drop_count: int) -> list[dict]:
     events: list[dict] = []
     for i in range(edit_drop_count):
-        cause = safe_str(st.session_state.get(f"edit_event_{i}_cause", "ミス"), "ミス")
-        drop_team = safe_str(st.session_state.get(f"edit_event_{i}_drop_team", "A"), "A")
-        if cause == "ナイスディフェンス":
+        event_type = safe_str(st.session_state.get(f"edit_event_{i}_cause", "ミス"), "ミス")
+        event_team = safe_str(st.session_state.get(f"edit_event_{i}_drop_team", "A"), "A")
+        if event_type == "ナイスディフェンス":
             throw_category = safe_str(
                 st.session_state.get(f"edit_event_{i}_throw_category", THROW_CATEGORY_OPTIONS[0]),
                 THROW_CATEGORY_OPTIONS[0],
@@ -458,8 +684,9 @@ def collect_edit_events(edit_drop_count: int) -> list[dict]:
             throw_detail_options = THROW_DETAIL_OPTIONS.get(throw_category, ["-"])
             events.append(
                 {
-                    "cause": cause,
+                    "cause": event_type,
                     "drop_type": "",
+                    "shot_type": "",
                     "throw_category": throw_category,
                     "throw_detail": safe_str(
                         st.session_state.get(f"edit_event_{i}_throw_detail", throw_detail_options[0]),
@@ -467,7 +694,8 @@ def collect_edit_events(edit_drop_count: int) -> list[dict]:
                     ),
                     "place_side": "",
                     "place_end": "",
-                    "mistake_team": drop_team,
+                    "mistake_team": event_team,
+                    "event_team": "",
                     "from_player": "",
                     "to_player": "",
                     "defender_name": safe_str(st.session_state.get(f"edit_event_{i}_defender_name", "")),
@@ -475,6 +703,33 @@ def collect_edit_events(edit_drop_count: int) -> list[dict]:
                         st.session_state.get(f"edit_event_{i}_nice_defense_type", NICE_DEFENSE_TYPE_OPTIONS[0]),
                         NICE_DEFENSE_TYPE_OPTIONS[0],
                     ),
+                }
+            )
+        elif event_type == "シュート":
+            events.append(
+                {
+                    "cause": "シュート",
+                    "drop_type": "",
+                    "shot_type": safe_str(
+                        st.session_state.get(f"edit_event_{i}_shot_type", SHOT_TYPE_OPTIONS[0]),
+                        SHOT_TYPE_OPTIONS[0],
+                    ),
+                    "throw_category": "",
+                    "throw_detail": "",
+                    "place_side": safe_str(
+                        st.session_state.get(f"edit_event_{i}_place_side", PLACE_SIDE_OPTIONS[0]),
+                        PLACE_SIDE_OPTIONS[0],
+                    ),
+                    "place_end": safe_str(
+                        st.session_state.get(f"edit_event_{i}_place_end", PLACE_END_OPTIONS[0]),
+                        PLACE_END_OPTIONS[0],
+                    ),
+                    "mistake_team": "",
+                    "event_team": event_team,
+                    "from_player": safe_str(st.session_state.get(f"edit_event_{i}_from_player", "")),
+                    "to_player": safe_str(st.session_state.get(f"edit_event_{i}_to_player", "")),
+                    "defender_name": "",
+                    "nice_defense_type": "",
                 }
             )
         else:
@@ -487,6 +742,7 @@ def collect_edit_events(edit_drop_count: int) -> list[dict]:
                 {
                     "cause": "ミス",
                     "drop_type": safe_str(st.session_state.get(f"edit_event_{i}_drop_type", "")),
+                    "shot_type": "",
                     "throw_category": throw_category,
                     "throw_detail": safe_str(
                         st.session_state.get(f"edit_event_{i}_throw_detail", throw_detail_options[0]),
@@ -500,7 +756,8 @@ def collect_edit_events(edit_drop_count: int) -> list[dict]:
                         st.session_state.get(f"edit_event_{i}_place_end", PLACE_END_OPTIONS[0]),
                         PLACE_END_OPTIONS[0],
                     ),
-                    "mistake_team": drop_team,
+                    "mistake_team": event_team,
+                    "event_team": "",
                     "from_player": safe_str(st.session_state.get(f"edit_event_{i}_from_player", "")),
                     "to_player": safe_str(st.session_state.get(f"edit_event_{i}_to_player", "")),
                     "defender_name": "",
@@ -531,6 +788,8 @@ def load_turn_into_edit_state(turn_index: int) -> None:
     st.session_state.edit_team_b_member = turn.get("team_b_member", MEMBER_OPTIONS[2])
     st.session_state.edit_team_a_force = turn.get("team_a_force", FORCE_OPTIONS[0])
     st.session_state.edit_team_b_force = turn.get("team_b_force", FORCE_OPTIONS[0])
+    st.session_state.edit_team_a_wind = turn.get("team_a_wind", WIND_OPTIONS[0])
+    st.session_state.edit_team_b_wind = turn.get("team_b_wind", WIND_OPTIONS[0])
     st.session_state.edit_team_a_defense_type = turn.get("team_a_defense_type", DEFENSE_TYPE_OPTIONS[0])
     st.session_state.edit_team_b_defense_type = turn.get("team_b_defense_type", DEFENSE_TYPE_OPTIONS[0])
     st.session_state.edit_score_pattern = turn.get("score_pattern", SCORE_PATTERN_OPTIONS[0])
@@ -541,8 +800,9 @@ def load_turn_into_edit_state(turn_index: int) -> None:
     st.session_state.edit_drop_count = len(events)
     for i, event in enumerate(events):
         st.session_state[f"edit_event_{i}_cause"] = event.get("cause", "ミス")
-        st.session_state[f"edit_event_{i}_drop_team"] = event.get("mistake_team", "A")
+        st.session_state[f"edit_event_{i}_drop_team"] = event.get("mistake_team") or event.get("event_team", "A")
         st.session_state[f"edit_event_{i}_drop_type"] = event.get("drop_type", "")
+        st.session_state[f"edit_event_{i}_shot_type"] = event.get("shot_type", SHOT_TYPE_OPTIONS[0])
         st.session_state[f"edit_event_{i}_throw_category"] = event.get("throw_category", THROW_CATEGORY_OPTIONS[0])
         throw_category = st.session_state[f"edit_event_{i}_throw_category"]
         details = THROW_DETAIL_OPTIONS.get(throw_category, ["-"])
@@ -569,6 +829,8 @@ def apply_edit_to_turn(turn_index: int) -> None:
         "team_b_member": safe_str(st.session_state.edit_team_b_member, MEMBER_OPTIONS[2]),
         "team_a_force": safe_str(st.session_state.edit_team_a_force, FORCE_OPTIONS[0]),
         "team_b_force": safe_str(st.session_state.edit_team_b_force, FORCE_OPTIONS[0]),
+        "team_a_wind": safe_str(st.session_state.edit_team_a_wind, WIND_OPTIONS[0]),
+        "team_b_wind": safe_str(st.session_state.edit_team_b_wind, WIND_OPTIONS[0]),
         "team_a_defense_type": safe_str(st.session_state.edit_team_a_defense_type, DEFENSE_TYPE_OPTIONS[0]),
         "team_b_defense_type": safe_str(st.session_state.edit_team_b_defense_type, DEFENSE_TYPE_OPTIONS[0]),
         "score_pattern": safe_str(st.session_state.edit_score_pattern, SCORE_PATTERN_OPTIONS[0]),
@@ -590,13 +852,14 @@ def build_events_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             rows.append(
                 {
                     "turn_no": int(row["turn_no"]),
-                    "cause": safe_str(event.get("cause", "")),
+                    "event_type": safe_str(event.get("cause", "")),
                     "drop_type": safe_str(event.get("drop_type", "")),
+                    "shot_type": safe_str(event.get("shot_type", "")),
                     "throw_category": safe_str(event.get("throw_category", "")),
                     "throw_detail": safe_str(event.get("throw_detail", "")),
                     "place_side": safe_str(event.get("place_side", "")),
                     "place_end": safe_str(event.get("place_end", "")),
-                    "mistake_team": safe_str(event.get("mistake_team", "")),
+                    "team": safe_str(event.get("mistake_team", "")),
                     "from_player": safe_str(event.get("from_player", "")),
                     "to_player": safe_str(event.get("to_player", "")),
                     "defender_name": safe_str(event.get("defender_name", "")),
@@ -671,6 +934,7 @@ with st.container(border=True):
         FORCE_OPTIONS,
         key="team_a_force",
     )
+    st.selectbox("風向き", WIND_OPTIONS, key="team_a_wind")
 
     st.markdown(f"**{get_team_label('B')}**")
     st.selectbox("メンバー", MEMBER_OPTIONS, key="team_b_member")
@@ -684,25 +948,23 @@ with st.container(border=True):
         FORCE_OPTIONS,
         key="team_b_force",
     )
+    st.selectbox("風向き", WIND_OPTIONS, key="team_b_wind")
 
 with st.container(border=True):
     st.markdown("#### 3) ターン内イベント")
-    c_cnt, c_sub = st.columns([2, 1])
+    c_cnt = st.columns([1])[0]
     c_cnt.markdown(
         f"<div style='text-align:center;padding-top:0.7rem;'>件数: <b>{int(st.session_state.drop_count)}</b></div>",
         unsafe_allow_html=True,
     )
-    if c_sub.button("－ イベント削除"):
-        st.session_state.drop_count = max(int(st.session_state.drop_count) - 1, 0)
-        st.rerun()
 
 drop_count = int(st.session_state.drop_count)
 for i in range(drop_count):
     with st.container(border=True):
         st.markdown(f"**イベント {i + 1}**")
-        st.selectbox("原因", EVENT_CAUSE_OPTIONS, key=f"event_{i}_cause")
+        st.selectbox("イベント種別", EVENT_TYPE_OPTIONS, key=f"event_{i}_cause")
         st.radio(
-            "ドロップしたチーム",
+            "該当チーム",
             ["A", "B"],
             horizontal=True,
             key=f"event_{i}_drop_team",
@@ -726,6 +988,12 @@ for i in range(drop_count):
                 key=f"event_{i}_nice_defense_type",
             )
             st.text_input("ディフェンスした人", key=f"event_{i}_defender_name", placeholder="例: 高橋")
+        elif st.session_state.get(f"event_{i}_cause", "ミス") == "シュート":
+            st.selectbox("シュートの種類", SHOT_TYPE_OPTIONS, key=f"event_{i}_shot_type")
+            st.selectbox("場所（左右）", PLACE_SIDE_OPTIONS, key=f"event_{i}_place_side")
+            st.selectbox("場所（局面）", PLACE_END_OPTIONS, key=f"event_{i}_place_end")
+            st.text_input("誰から（パサー）", key=f"event_{i}_from_player", placeholder="例: 田中")
+            st.text_input("誰へ（シューター）", key=f"event_{i}_to_player", placeholder="例: 佐藤")
         else:
             st.selectbox("ミスの種類", DROP_TYPE_OPTIONS, key=f"event_{i}_drop_type")
             st.selectbox("スローの種類", THROW_CATEGORY_OPTIONS, key=f"event_{i}_throw_category")
@@ -738,14 +1006,18 @@ for i in range(drop_count):
                 THROW_DETAIL_OPTIONS.get(selected_throw_category, ["-"]),
                 key=f"event_{i}_throw_detail",
             )
-            st.selectbox("場所（ハメ側/アンハメ側）", PLACE_SIDE_OPTIONS, key=f"event_{i}_place_side")
-            st.selectbox("場所（エンド前/Not）", PLACE_END_OPTIONS, key=f"event_{i}_place_end")
+            st.selectbox("場所（左右）", PLACE_SIDE_OPTIONS, key=f"event_{i}_place_side")
+            st.selectbox("場所（局面）", PLACE_END_OPTIONS, key=f"event_{i}_place_end")
             st.text_input("誰から（パサー）", key=f"event_{i}_from_player", placeholder="例: 田中")
             st.text_input("誰へ（レシーバー）", key=f"event_{i}_to_player", placeholder="例: 佐藤")
 
 with st.container(border=True):
-    if st.button("＋ イベント追加", key="add_event_bottom", use_container_width=True):
+    event_btn_add, event_btn_del = st.columns(2)
+    if event_btn_add.button("＋ イベント追加", key="add_event_bottom", use_container_width=True):
         st.session_state.drop_count = min(int(st.session_state.drop_count) + 1, 10)
+        st.rerun()
+    if event_btn_del.button("－ イベント削除", key="remove_event_bottom", use_container_width=True):
+        st.session_state.drop_count = max(int(st.session_state.drop_count) - 1, 0)
         st.rerun()
 
 with st.container(border=True):
@@ -764,6 +1036,8 @@ if col_a.button(f"{get_team_label('A')} 得点", use_container_width=True, type=
         team_b_member=st.session_state.team_b_member,
         team_a_force=st.session_state.team_a_force,
         team_b_force=st.session_state.team_b_force,
+        team_a_wind=st.session_state.team_a_wind,
+        team_b_wind=st.session_state.team_b_wind,
         team_a_defense_type=st.session_state.team_a_defense_type,
         team_b_defense_type=st.session_state.team_b_defense_type,
         score_pattern=st.session_state.score_pattern,
@@ -787,6 +1061,8 @@ if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type=
         team_b_member=st.session_state.team_b_member,
         team_a_force=st.session_state.team_a_force,
         team_b_force=st.session_state.team_b_force,
+        team_a_wind=st.session_state.team_a_wind,
+        team_b_wind=st.session_state.team_b_wind,
         team_a_defense_type=st.session_state.team_a_defense_type,
         team_b_defense_type=st.session_state.team_b_defense_type,
         score_pattern=st.session_state.score_pattern,
@@ -804,17 +1080,11 @@ if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type=
 
 with st.container(border=True):
     st.markdown("#### 5) 操作")
-    op1, op2 = st.columns(2)
+    op1 = st.columns(1)[0]
     if op1.button("直前ターンを削除", use_container_width=True):
         if st.session_state.turns:
             st.session_state.turns.pop()
             sync_turns_to_gsheets_from_state()
-        st.rerun()
-
-    if op2.button("全データをリセット", use_container_width=True):
-        st.session_state.turns = []
-        sync_turns_to_gsheets_from_state()
-        st.success("セッションデータをリセットし、Google Sheetsへ反映しました。")
         st.rerun()
 
 df = turns_to_dataframe(st.session_state.turns)
@@ -857,9 +1127,11 @@ with st.expander("過去ターン修正", expanded=False):
                 st.selectbox("Aメンバー", MEMBER_OPTIONS, key="edit_team_a_member")
                 st.selectbox("Aディフェンスタイプ", DEFENSE_TYPE_OPTIONS, key="edit_team_a_defense_type")
                 st.selectbox("Aフォース", FORCE_OPTIONS, key="edit_team_a_force")
+                st.selectbox("A風向き", WIND_OPTIONS, key="edit_team_a_wind")
                 st.selectbox("Bメンバー", MEMBER_OPTIONS, key="edit_team_b_member")
                 st.selectbox("Bディフェンスタイプ", DEFENSE_TYPE_OPTIONS, key="edit_team_b_defense_type")
                 st.selectbox("Bフォース", FORCE_OPTIONS, key="edit_team_b_force")
+                st.selectbox("B風向き", WIND_OPTIONS, key="edit_team_b_wind")
 
                 st.markdown("##### 得点情報")
                 st.selectbox("得点の取り方", SCORE_PATTERN_OPTIONS, key="edit_score_pattern")
@@ -873,8 +1145,8 @@ with st.expander("過去ターン修正", expanded=False):
                 for i in range(int(st.session_state.edit_drop_count)):
                     with st.container(border=True):
                         st.markdown(f"**編集イベント {i + 1}**")
-                        st.selectbox("原因", EVENT_CAUSE_OPTIONS, key=f"edit_event_{i}_cause")
-                        st.radio("ドロップしたチーム", ["A", "B"], horizontal=True, key=f"edit_event_{i}_drop_team")
+                        st.selectbox("イベント種別", EVENT_TYPE_OPTIONS, key=f"edit_event_{i}_cause")
+                        st.radio("該当チーム", ["A", "B"], horizontal=True, key=f"edit_event_{i}_drop_team")
 
                         if st.session_state.get(f"edit_event_{i}_cause", "ミス") == "ナイスディフェンス":
                             st.selectbox("スローの種類", THROW_CATEGORY_OPTIONS, key=f"edit_event_{i}_throw_category")
@@ -889,6 +1161,12 @@ with st.expander("過去ターン修正", expanded=False):
                             )
                             st.selectbox("ナイスディフェンスの種類", NICE_DEFENSE_TYPE_OPTIONS, key=f"edit_event_{i}_nice_defense_type")
                             st.text_input("ディフェンスした人", key=f"edit_event_{i}_defender_name")
+                        elif st.session_state.get(f"edit_event_{i}_cause", "ミス") == "シュート":
+                            st.selectbox("シュートの種類", SHOT_TYPE_OPTIONS, key=f"edit_event_{i}_shot_type")
+                            st.selectbox("場所（左右）", PLACE_SIDE_OPTIONS, key=f"edit_event_{i}_place_side")
+                            st.selectbox("場所（局面）", PLACE_END_OPTIONS, key=f"edit_event_{i}_place_end")
+                            st.text_input("誰から（パサー）", key=f"edit_event_{i}_from_player")
+                            st.text_input("誰へ（シューター）", key=f"edit_event_{i}_to_player")
                         else:
                             st.selectbox("ミスの種類", DROP_TYPE_OPTIONS, key=f"edit_event_{i}_drop_type")
                             st.selectbox("スローの種類", THROW_CATEGORY_OPTIONS, key=f"edit_event_{i}_throw_category")
@@ -901,8 +1179,8 @@ with st.expander("過去ターン修正", expanded=False):
                                 THROW_DETAIL_OPTIONS.get(selected_throw_category, ["-"]),
                                 key=f"edit_event_{i}_throw_detail",
                             )
-                            st.selectbox("場所（ハメ側/アンハメ側）", PLACE_SIDE_OPTIONS, key=f"edit_event_{i}_place_side")
-                            st.selectbox("場所（エンド前/Not）", PLACE_END_OPTIONS, key=f"edit_event_{i}_place_end")
+                            st.selectbox("場所（左右）", PLACE_SIDE_OPTIONS, key=f"edit_event_{i}_place_side")
+                            st.selectbox("場所（局面）", PLACE_END_OPTIONS, key=f"edit_event_{i}_place_end")
                             st.text_input("誰から（パサー）", key=f"edit_event_{i}_from_player")
                             st.text_input("誰へ（レシーバー）", key=f"edit_event_{i}_to_player")
 
@@ -972,9 +1250,11 @@ preview_col1.write(f"- ターン開始オフェンス: {team_a_name_display if s
 preview_col1.write(
     f"- {team_a_name_display}: メンバー={st.session_state.team_a_member} / D={st.session_state.team_a_defense_type}{'（TO後）' if st.session_state.offense_start_team == 'A' else ''} / フォース={st.session_state.team_a_force}"
 )
+preview_col1.write(f"- {team_a_name_display}: 風向き={st.session_state.team_a_wind}")
 preview_col1.write(
     f"- {team_b_name_display}: メンバー={st.session_state.team_b_member} / D={st.session_state.team_b_defense_type}{'（TO後）' if st.session_state.offense_start_team == 'B' else ''} / フォース={st.session_state.team_b_force}"
 )
+preview_col1.write(f"- {team_b_name_display}: 風向き={st.session_state.team_b_wind}")
 preview_col2.write(f"- イベント数: {drop_count}")
 preview_col2.write(f"- 得点パターン: {st.session_state.score_pattern}")
 score_route_preview = " -> ".join(
@@ -1084,7 +1364,7 @@ keep_col2.metric(
 )
 
 
-events_df = build_events_dataframe(df)
+events_df = build_event_export_dataframe(st.session_state.turns)
 st.subheader("ターンログ")
 show_df = df[
     [
@@ -1095,6 +1375,7 @@ show_df = df[
         "team_a_member",
         "team_a_defense_type",
         "team_a_force",
+        "team_a_wind",
         "team_b_member",
         "team_b_defense_type",
         "team_b_force",
@@ -1118,6 +1399,7 @@ show_df = show_df.rename(
         "team_a_member": f"{team_a_name_display}_メンバー",
         "team_a_defense_type": f"{team_a_name_display}_Dタイプ",
         "team_a_force": f"{team_a_name_display}_フォース",
+        "team_a_wind": f"{team_a_name_display}_風向き",
         "team_b_member": f"{team_b_name_display}_メンバー",
         "team_b_defense_type": f"{team_b_name_display}_Dタイプ",
         "team_b_force": f"{team_b_name_display}_フォース",
@@ -1134,98 +1416,4 @@ if events_df.empty:
     st.write("イベント詳細はありません。")
 else:
     detail_df = events_df.copy()
-    detail_df["mistake_team"] = detail_df["mistake_team"].replace(
-        {"A": team_a_name_display, "B": team_b_name_display}
-    )
     st.dataframe(detail_df, use_container_width=True, hide_index=True)
-
-st.subheader("イベント分析（ミス / ナイスディフェンス）")
-
-if events_df.empty:
-    st.write("イベント記録はまだありません。")
-else:
-    left, right = st.columns(2)
-    with left:
-        st.write("原因別 件数")
-        st.dataframe(
-            events_df["cause"].value_counts().rename_axis("cause").reset_index(name="count"),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        mistake_only = events_df[events_df["cause"] == "ミス"]
-        if not mistake_only.empty:
-            st.write("ミス種類別 件数")
-            st.dataframe(
-                mistake_only["drop_type"]
-                .value_counts()
-                .rename_axis("drop_type")
-                .reset_index(name="count"),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.write("スロー種類別 件数")
-            st.dataframe(
-                mistake_only["throw_category"]
-                .value_counts()
-                .rename_axis("throw_category")
-                .reset_index(name="count"),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.write("スロー詳細別 件数")
-            st.dataframe(
-                mistake_only["throw_detail"]
-                .value_counts()
-                .rename_axis("throw_detail")
-                .reset_index(name="count"),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.write("場所（ハメ側/アンハメ側）件数")
-            st.dataframe(
-                mistake_only["place_side"]
-                .value_counts()
-                .rename_axis("place_side")
-                .reset_index(name="count"),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.write("場所（エンド前/Not）件数")
-            st.dataframe(
-                mistake_only["place_end"]
-                .value_counts()
-                .rename_axis("place_end")
-                .reset_index(name="count"),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    with right:
-        nice_df = events_df[events_df["cause"] == "ナイスディフェンス"]
-        if nice_df.empty:
-            st.write("ナイスディフェンス記録はまだありません。")
-        else:
-            st.write("ナイスディフェンスした人")
-            defender_counts = (
-                nice_df[nice_df["defender_name"].astype(str).str.strip() != ""]["defender_name"]
-                .value_counts()
-                .rename_axis("defender_name")
-                .reset_index(name="count")
-            )
-            st.dataframe(defender_counts, use_container_width=True, hide_index=True)
-
-            if "nice_defense_type" in nice_df.columns:
-                st.write("ナイスディフェンス種類別 件数")
-                nice_type_counts = (
-                    nice_df[nice_df["nice_defense_type"].astype(str).str.strip() != ""]["nice_defense_type"]
-                    .value_counts()
-                    .rename_axis("nice_defense_type")
-                    .reset_index(name="count")
-                )
-                st.dataframe(nice_type_counts, use_container_width=True, hide_index=True)
-
