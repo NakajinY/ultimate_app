@@ -402,16 +402,32 @@ if st.session_state.pending_turn_input_reset:
     reset_turn_inputs()
     st.session_state.pending_turn_input_reset = False
 
-st.sidebar.title("入力")
+st.markdown(
+    """
+    <style>
+    .block-container {padding-top: 0.7rem; padding-left: 0.8rem; padding-right: 0.8rem;}
+    div.stButton > button {
+        width: 100%;
+        min-height: 52px;
+        font-size: 1rem;
+        border-radius: 10px;
+    }
+    [data-testid="stHorizontalBlock"] {gap: 0.45rem;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-with st.sidebar.container(border=True):
-    st.markdown("#### 試合情報")
+st.subheader("入力（スマホ最適化）")
+
+with st.container(border=True):
+    st.markdown("#### 1) 試合情報")
     st.text_input("試合タイトル", key="match_title", placeholder="例: 春季リーグ 第2節")
     st.text_input("Aチーム名", key="team_a_name", placeholder="例: 東京アルティメット")
     st.text_input("Bチーム名", key="team_b_name", placeholder="例: 京都アルティメット")
 
-with st.sidebar.container(border=True):
-    st.markdown("#### ターン基本情報")
+with st.container(border=True):
+    st.markdown("#### 2) ターン基本情報")
     st.radio(
         "ターン開始時のオフェンスチーム",
         ["A", "B"],
@@ -422,7 +438,7 @@ with st.sidebar.container(border=True):
     st.markdown(f"**{get_team_label('A')}**")
     st.selectbox("メンバー", MEMBER_OPTIONS, key="team_a_member")
     st.selectbox(
-        "ディフェンスタイプ" + "（TO後）" if st.session_state.offense_start_team == "A" else "ディフェンスタイプ",
+        "ディフェンスタイプ（TO後）" if st.session_state.offense_start_team == "A" else "ディフェンスタイプ",
         DEFENSE_TYPE_OPTIONS,
         key="team_a_defense_type",
     )
@@ -431,19 +447,29 @@ with st.sidebar.container(border=True):
     st.markdown(f"**{get_team_label('B')}**")
     st.selectbox("メンバー", MEMBER_OPTIONS, key="team_b_member")
     st.selectbox(
-        "ディフェンスタイプ" + "（TO後）" if st.session_state.offense_start_team == "B" else "ディフェンスタイプ",
+        "ディフェンスタイプ（TO後）" if st.session_state.offense_start_team == "B" else "ディフェンスタイプ",
         DEFENSE_TYPE_OPTIONS,
         key="team_b_defense_type",
     )
     st.selectbox("フォース", FORCE_OPTIONS, key="team_b_force")
 
-with st.sidebar.container(border=True):
-    st.markdown("#### ターン内イベント")
-    st.number_input("このターンのドロップ/ディフェンスイベント数", min_value=0, max_value=10, step=1, key="drop_count")
+with st.container(border=True):
+    st.markdown("#### 3) ターン内イベント")
+    c_add, c_cnt, c_sub = st.columns([1, 1, 1])
+    if c_add.button("＋ イベント追加"):
+        st.session_state.drop_count = min(int(st.session_state.drop_count) + 1, 10)
+        st.rerun()
+    c_cnt.markdown(
+        f"<div style='text-align:center;padding-top:0.7rem;'>件数: <b>{int(st.session_state.drop_count)}</b></div>",
+        unsafe_allow_html=True,
+    )
+    if c_sub.button("－ イベント削除"):
+        st.session_state.drop_count = max(int(st.session_state.drop_count) - 1, 0)
+        st.rerun()
 
 drop_count = int(st.session_state.drop_count)
 for i in range(drop_count):
-    with st.sidebar.container(border=True):
+    with st.container(border=True):
         st.markdown(f"**イベント {i + 1}**")
         st.selectbox("原因", EVENT_CAUSE_OPTIONS, key=f"event_{i}_cause")
         st.radio(
@@ -488,8 +514,8 @@ for i in range(drop_count):
             st.text_input("誰から（パサー）", key=f"event_{i}_from_player", placeholder="例: 田中")
             st.text_input("誰へ（レシーバー）", key=f"event_{i}_to_player", placeholder="例: 佐藤")
 
-with st.sidebar.container(border=True):
-    st.subheader("得点入力（1ターン=1得点）")
+with st.container(border=True):
+    st.markdown("#### 4) 得点入力（1ターン=1得点）")
     col_a, col_b = st.columns(2)
 
 if col_a.button(f"{get_team_label('A')} 得点", use_container_width=True, type="primary"):
@@ -528,13 +554,15 @@ if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type=
     schedule_turn_input_reset()
     st.rerun()
 
-with st.sidebar.container(border=True):
-    if st.button("直前ターンを削除", use_container_width=True):
+with st.container(border=True):
+    st.markdown("#### 5) 操作")
+    op1, op2 = st.columns(2)
+    if op1.button("直前ターンを削除", use_container_width=True):
         if st.session_state.turns:
             st.session_state.turns.pop()
         st.rerun()
 
-    if st.button("全データをリセット", use_container_width=True):
+    if op2.button("全データをリセット", use_container_width=True):
         st.session_state.turns = []
         if CSV_PATH.exists():
             CSV_PATH.unlink()
@@ -543,8 +571,7 @@ with st.sidebar.container(border=True):
 
 df = turns_to_dataframe(st.session_state.turns)
 
-with st.sidebar.container(border=True):
-    st.markdown("#### 保存・読込")
+with st.expander("保存・読込", expanded=False):
     if st.button("CSVに保存", use_container_width=True):
         save_csv(df)
         st.success(f"保存しました: {CSV_PATH.name}")
@@ -602,7 +629,7 @@ else:
     st.dataframe(preview_events_df, use_container_width=True, hide_index=True)
 
 if df.empty:
-    st.info("サイドバーで属性を選び、A得点/B得点ボタンでターンを記録してください。")
+    st.info("画面上部の入力フォームで属性を選び、得点ボタンでターンを記録してください。")
     st.stop()
 
 if "team_a_name" in df.columns:
