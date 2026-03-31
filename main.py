@@ -1277,6 +1277,22 @@ with st.container(border=True):
     st.text_input("入力者", key="input_by", placeholder="例: nakajima（不明なら -）")
 
 with st.container(border=True):
+    st.markdown("#### 現在スコア（入力補助）")
+    quick_df = turns_to_dataframe(active_turns)
+    if quick_df.empty:
+        st.caption("この試合の記録はまだありません。")
+    else:
+        quick_df["A_score"] = (quick_df["point_winner"] == "A").cumsum()
+        quick_df["B_score"] = (quick_df["point_winner"] == "B").cumsum()
+        quick_latest = quick_df.iloc[-1]
+        quick_c1, quick_c2 = st.columns(2)
+        quick_c1.metric(get_team_label("A"), int(quick_latest["A_score"]))
+        quick_c2.metric(get_team_label("B"), int(quick_latest["B_score"]))
+
+        st.markdown("##### 得点推移")
+        render_score_trend_chart(quick_df, get_team_label("A"), get_team_label("B"))
+
+with st.container(border=True):
     st.markdown("#### 2) ターン基本情報")
     st.radio(
         "ターン開始時のオフェンスチーム",
