@@ -3,6 +3,7 @@ import importlib
 from datetime import date
 from datetime import datetime
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -80,6 +81,50 @@ def safe_int(value: object, default: int = 0) -> int:
         return int(value)
     except Exception:
         return default
+
+
+def render_score_trend_chart(df: pd.DataFrame, team_a_name: str, team_b_name: str) -> None:
+    if df.empty or "turn_no" not in df.columns:
+        st.info("得点推移を表示するデータがありません。")
+        return
+
+    plot_df = df[["turn_no", "A_score", "B_score"]].copy()
+    plot_df = plot_df.rename(columns={"A_score": team_a_name, "B_score": team_b_name})
+    long_df = plot_df.melt(id_vars=["turn_no"], var_name="team", value_name="score")
+
+    line = (
+        alt.Chart(long_df)
+        .mark_line(point=True, interpolate="step-after", strokeWidth=3)
+        .encode(
+            x=alt.X("turn_no:Q", title="ターン", axis=alt.Axis(tickMinStep=1)),
+            y=alt.Y("score:Q", title="得点", axis=alt.Axis(tickMinStep=1)),
+            color=alt.Color("team:N", title="チーム"),
+            tooltip=[
+                alt.Tooltip("turn_no:Q", title="ターン"),
+                alt.Tooltip("team:N", title="チーム"),
+                alt.Tooltip("score:Q", title="得点"),
+            ],
+        )
+    )
+
+    labels = (
+        alt.Chart(long_df)
+        .transform_window(
+            row_number="row_number()",
+            sort=[alt.SortField("turn_no", order="descending")],
+            groupby=["team"],
+        )
+        .transform_filter("datum.row_number == 1")
+        .mark_text(dx=8, dy=-8, fontSize=12)
+        .encode(
+            x="turn_no:Q",
+            y="score:Q",
+            text=alt.Text("score:Q"),
+            color="team:N",
+        )
+    )
+
+    st.altair_chart((line + labels).properties(height=360), use_container_width=True)
 
 
 def build_match_index(turns: list[dict]) -> dict[str, dict]:
@@ -1678,9 +1723,7 @@ score_col1.metric(team_a_name_display, int(latest["A_score"]))
 score_col2.metric(team_b_name_display, int(latest["B_score"]))
 
 st.subheader("得点推移")
-score_chart = df[["turn_no", "A_score", "B_score"]].set_index("turn_no")
-score_chart = score_chart.rename(columns={"A_score": team_a_name_display, "B_score": team_b_name_display})
-st.line_chart(score_chart)
+render_score_trend_chart(df, team_a_name_display, team_b_name_display)
 
 st.subheader("ブレイク集計")
 break_a = int(((df["point_winner"] == "A") & (df["is_break"])).sum())
