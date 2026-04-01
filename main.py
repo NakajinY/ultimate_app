@@ -41,6 +41,15 @@ def parse_bool(value: object) -> bool:
     return str(value).strip().lower() in {"true", "1", "yes", "y"}
 
 
+def parse_optional_bool(value: object) -> bool | None:
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y", "t"}:
+        return True
+    if text in {"false", "0", "no", "n", "f"}:
+        return False
+    return None
+
+
 def safe_str(value: object, default: str = "") -> str:
     if value is None:
         return default
@@ -125,6 +134,11 @@ def render_score_trend_chart(df: pd.DataFrame, team_a_name: str, team_b_name: st
     )
 
     st.altair_chart((line + labels).properties(height=360), use_container_width=True)
+
+
+def normalize_is_break_value(value: object) -> bool:
+    parsed = parse_optional_bool(value)
+    return False if parsed is None else parsed
 
 
 def build_match_index(turns: list[dict]) -> dict[str, dict]:
@@ -493,6 +507,25 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
 
     records: list[dict] = []
     for _, row in df.iterrows():
+        team_a_name = safe_str(row.get("team_a_name", "Aチーム"), "Aチーム")
+        team_b_name = safe_str(row.get("team_b_name", "Bチーム"), "Bチーム")
+        offense_start_team = normalize_team_code(
+            row.get("offense_start_team", "A"),
+            team_a_name,
+            team_b_name,
+            "A",
+        )
+        point_winner = normalize_team_code(
+            row.get("point_winner", "A"),
+            team_a_name,
+            team_b_name,
+            "A",
+        )
+
+        is_break_value = parse_optional_bool(row.get("is_break", None))
+        if is_break_value is None:
+            is_break_value = point_winner != offense_start_team
+
         events = []
         if "drop_events_json" in df.columns:
             events = parse_events_json(row.get("drop_events_json", ""))
@@ -535,20 +568,10 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
                 "turn_id": safe_str(row.get("turn_id", "")),
                 "match_date": safe_str(row.get("match_date", "")),
                 "match_title": safe_str(row.get("match_title", "練習試合"), "練習試合"),
-                "team_a_name": safe_str(row.get("team_a_name", "Aチーム"), "Aチーム"),
-                "team_b_name": safe_str(row.get("team_b_name", "Bチーム"), "Bチーム"),
-                "offense_start_team": normalize_team_code(
-                    row.get("offense_start_team", "A"),
-                    safe_str(row.get("team_a_name", "Aチーム"), "Aチーム"),
-                    safe_str(row.get("team_b_name", "Bチーム"), "Bチーム"),
-                    "A",
-                ),
-                "point_winner": normalize_team_code(
-                    row.get("point_winner", "A"),
-                    safe_str(row.get("team_a_name", "Aチーム"), "Aチーム"),
-                    safe_str(row.get("team_b_name", "Bチーム"), "Bチーム"),
-                    "A",
-                ),
+                "team_a_name": team_a_name,
+                "team_b_name": team_b_name,
+                "offense_start_team": offense_start_team,
+                "point_winner": point_winner,
                 "team_a_member": safe_str(
                     row.get(
                         "team_a_member",
@@ -588,7 +611,7 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
                 "drop_count": len(events),
                 "drop_events": events,
                 "drop_events_json": json.dumps(events, ensure_ascii=False),
-                "is_break": parse_bool(row.get("is_break", False)),
+                "is_break": is_break_value,
             }
         )
 
@@ -1728,6 +1751,8 @@ if "match_date" in df.columns:
     match_date_display = safe_str(df.iloc[-1].get("match_date", match_date_display), match_date_display)
 
 st.caption(f"試合: {match_date_display} {match_title_display}".strip())
+
+df["is_break"] = df["is_break"].apply(normalize_is_break_value)
 
 df["A_score"] = (df["point_winner"] == "A").cumsum()
 df["B_score"] = (df["point_winner"] == "B").cumsum()
