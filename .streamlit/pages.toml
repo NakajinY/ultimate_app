@@ -1,0 +1,9 @@
+[[pages]]
+path = "main.py"
+name = "data input"
+icon = "📝"
+
+[[pages]]
+path = "pages/2_data_analysys.py"
+name = "data analysis"
+icon = "📊"

@@ -3,9 +3,10 @@ import importlib
 from datetime import date
 from datetime import datetime
 
-import altair as alt
 import pandas as pd
 import streamlit as st
+
+from app.analysis_utils import normalize_is_break_value, render_score_trend_chart
 
 
 st.set_page_config(page_title="アルティメット記録・分析", layout="wide")
@@ -32,15 +33,23 @@ THROW_DETAIL_OPTIONS = {
 PLACE_SIDE_OPTIONS = ["ハメ側","真ん中", "アンハメ側"]
 PLACE_END_OPTIONS = ["序盤", "中盤", "エンド前"]
 SCORE_PATTERN_OPTIONS = ["シュートがドーン", "ミート、展開コツコツ", "TOからの速攻"]
+MATCH_FORMAT_OPTIONS = [
+    "身内練習（A=O / B=D）",
+    "身内練習（ごちゃまぜ）",
+    "対外試合",
+]
+OD_START_RULE_OPTIONS = ["O固定スタート", "試合形式（被得点側が次O）"]
 GSHEETS_WORKSHEET = "turn_log"
 GSHEETS_EVENTS_WORKSHEET = "event_log"
 UNKNOWN_VALUE = "-"
 
 
+# parse_bool関数: 真偽値っぽい文字列をboolへ変換
 def parse_bool(value: object) -> bool:
     return str(value).strip().lower() in {"true", "1", "yes", "y"}
 
 
+# parse_optional_bool関数: 真偽判定できない値はNoneで返す
 def parse_optional_bool(value: object) -> bool | None:
     text = str(value).strip().lower()
     if text in {"true", "1", "yes", "y", "t"}:
@@ -50,6 +59,7 @@ def parse_optional_bool(value: object) -> bool | None:
     return None
 
 
+# safe_str関数: None/nanを安全に文字列化
 def safe_str(value: object, default: str = "") -> str:
     if value is None:
         return default
@@ -59,24 +69,29 @@ def safe_str(value: object, default: str = "") -> str:
     return text
 
 
+# normalize_unknown関数: 空欄を「-」へ正規化
 def normalize_unknown(value: object) -> str:
     text = safe_str(value, "").strip()
     return text if text else UNKNOWN_VALUE
 
 
+# now_iso関数: 現在時刻をISO文字列で返す
 def now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
 
 
+# build_match_id関数: 試合情報からmatch_idを生成
 def build_match_id(match_date: object, match_title: str, team_a_name: str, team_b_name: str) -> str:
     date_str = safe_str(match_date, "")
     return f"{normalize_unknown(date_str)}_{normalize_unknown(match_title)}_{normalize_unknown(team_a_name)}_vs_{normalize_unknown(team_b_name)}"
 
 
+# build_turn_id関数: match_idとturn_noからturn_idを生成
 def build_turn_id(match_id: str, turn_no: int) -> str:
     return f"{match_id}-{turn_no}"
 
 
+# parse_date_text_or_today関数: 文字列日付をdateへ変換（失敗時は今日）
 def parse_date_text_or_today(value: object) -> date:
     text = safe_str(value, "").strip()
     try:
@@ -85,6 +100,7 @@ def parse_date_text_or_today(value: object) -> date:
         return date.today()
 
 
+# safe_int関数: 例外を出さずint変換
 def safe_int(value: object, default: int = 0) -> int:
     try:
         return int(value)
@@ -92,55 +108,33 @@ def safe_int(value: object, default: int = 0) -> int:
         return default
 
 
-def render_score_trend_chart(df: pd.DataFrame, team_a_name: str, team_b_name: str) -> None:
-    if df.empty or "turn_no" not in df.columns:
-        st.info("得点推移を表示するデータがありません。")
-        return
-
-    plot_df = df[["turn_no", "A_score", "B_score"]].copy()
-    plot_df = plot_df.rename(columns={"A_score": team_a_name, "B_score": team_b_name})
-    long_df = plot_df.melt(id_vars=["turn_no"], var_name="team", value_name="score")
-
-    line = (
-        alt.Chart(long_df)
-        .mark_line(point=True, interpolate="step-after", strokeWidth=3)
-        .encode(
-            x=alt.X("turn_no:Q", title="ターン", axis=alt.Axis(tickMinStep=1)),
-            y=alt.Y("score:Q", title="得点", axis=alt.Axis(tickMinStep=1)),
-            color=alt.Color("team:N", title="チーム"),
-            tooltip=[
-                alt.Tooltip("turn_no:Q", title="ターン"),
-                alt.Tooltip("team:N", title="チーム"),
-                alt.Tooltip("score:Q", title="得点"),
-            ],
-        )
-    )
-
-    labels = (
-        alt.Chart(long_df)
-        .transform_window(
-            row_number="row_number()",
-            sort=[alt.SortField("turn_no", order="descending")],
-            groupby=["team"],
-        )
-        .transform_filter("datum.row_number == 1")
-        .mark_text(dx=8, dy=-8, fontSize=12)
-        .encode(
-            x="turn_no:Q",
-            y="score:Q",
-            text=alt.Text("score:Q"),
-            color="team:N",
-        )
-    )
-
-    st.altair_chart((line + labels).properties(height=360), use_container_width=True)
+# is_od_format関数: O対D系フォーマットかを判定
+def is_od_format(match_format: str) -> bool:
+    return match_format == MATCH_FORMAT_OPTIONS[0]
 
 
-def normalize_is_break_value(value: object) -> bool:
-    parsed = parse_optional_bool(value)
-    return False if parsed is None else parsed
+# default_od_start_rule_for_match_format関数: フォーマットに対する既定開始ルール
+def default_od_start_rule_for_match_format(match_format: str) -> str:
+    return OD_START_RULE_OPTIONS[0] if is_od_format(match_format) else OD_START_RULE_OPTIONS[1]
 
 
+# build_auto_match_title関数: フォーマット入力から試合タイトルを自動生成
+def build_auto_match_title(match_format: str, team_b_name: str, event_name: str, game_no: int) -> str:
+    safe_event_name = normalize_unknown(event_name)
+    safe_game_no = max(1, safe_int(game_no, 1))
+    if match_format == MATCH_FORMAT_OPTIONS[2]:
+        return f"vs{normalize_unknown(team_b_name)}（{safe_event_name}）第{safe_game_no}試合"
+    return f"{match_format} 第{safe_game_no}試合"
+
+
+# determine_next_offense_start_team関数: 得点後の次ターン開始Oチームを決定
+def determine_next_offense_start_team(point_winner: str, match_format: str, od_start_rule: str) -> str:
+    if is_od_format(match_format) and od_start_rule == OD_START_RULE_OPTIONS[0]:
+        return "A"
+    return "B" if point_winner == "A" else "A"
+
+
+# build_match_index関数: 既存ターンから試合選択用インデックスを作成
 def build_match_index(turns: list[dict]) -> dict[str, dict]:
     index: dict[str, dict] = {}
     for turn in turns:
@@ -159,6 +153,7 @@ def build_match_index(turns: list[dict]) -> dict[str, dict]:
             continue
         match_date = safe_str(turn.get("match_date", ""), "")
         match_title = safe_str(turn.get("match_title", ""), UNKNOWN_VALUE)
+        match_format = safe_str(turn.get("match_format", MATCH_FORMAT_OPTIONS[0]), MATCH_FORMAT_OPTIONS[0])
         team_a = safe_str(turn.get("team_a_name", ""), "Aチーム")
         team_b = safe_str(turn.get("team_b_name", ""), "Bチーム")
         label = f"{match_date} | {match_title} | {team_a} vs {team_b}"
@@ -166,6 +161,11 @@ def build_match_index(turns: list[dict]) -> dict[str, dict]:
             "match_id": match_id,
             "match_date": parse_date_text_or_today(match_date),
             "match_title": match_title,
+            "match_format": match_format,
+            "od_start_rule": safe_str(
+                turn.get("od_start_rule", default_od_start_rule_for_match_format(match_format)),
+                default_od_start_rule_for_match_format(match_format),
+            ),
             "team_a_name": team_a,
             "team_b_name": team_b,
             "label": label,
@@ -173,6 +173,7 @@ def build_match_index(turns: list[dict]) -> dict[str, dict]:
     return index
 
 
+# parse_events_json関数: JSON文字列をイベント配列へ変換
 def parse_events_json(value: object) -> list[dict]:
     if value is None:
         return []
@@ -190,16 +191,19 @@ def parse_events_json(value: object) -> list[dict]:
     return []
 
 
+# get_team_label関数: A/Bコードを現在のチーム名表示へ変換
 def get_team_label(code: str) -> str:
     team_a = safe_str(st.session_state.get("team_a_name", ""), "").strip() or "Aチーム"
     team_b = safe_str(st.session_state.get("team_b_name", ""), "").strip() or "Bチーム"
     return team_a if code == "A" else team_b
 
 
+# team_name_from_code関数: チームコードを指定チーム名へ変換
 def team_name_from_code(code: str, team_a_name: str, team_b_name: str) -> str:
     return team_a_name if code == "A" else team_b_name
 
 
+# normalize_team_code関数: チーム名やコードをA/Bコードへ正規化
 def normalize_team_code(value: object, team_a_name: str, team_b_name: str, default: str = "A") -> str:
     text = safe_str(value, default).strip()
     if text in {"A", "B"}:
@@ -211,6 +215,7 @@ def normalize_team_code(value: object, team_a_name: str, team_b_name: str, defau
     return default
 
 
+# initialize_state関数: アプリ全体のsession_state初期化
 def initialize_state() -> None:
     if "turns" not in st.session_state:
         st.session_state.turns = []
@@ -222,10 +227,17 @@ def initialize_state() -> None:
         st.session_state.last_sync_message = ""
 
 
+# initialize_input_state関数: 入力フォーム関連の初期値設定
 def initialize_input_state() -> None:
     defaults = {
         "match_date": date.today(),
         "match_title": "練習試合",
+        "match_format": MATCH_FORMAT_OPTIONS[0],
+        "od_start_rule": OD_START_RULE_OPTIONS[0],
+        "title_event_name": "練習試合",
+        "title_game_no": 1,
+        "last_applied_match_format": "",
+        "next_offense_start_team": "",
         "team_a_name": "Aチーム",
         "team_b_name": "Bチーム",
         "input_by": UNKNOWN_VALUE,
@@ -252,8 +264,11 @@ def initialize_input_state() -> None:
             st.session_state[key] = value
 
 
+# reset_turn_inputs関数: 1ターン入力欄をリセット
 def reset_turn_inputs() -> None:
-    st.session_state.offense_start_team = "A"
+    next_offense = safe_str(st.session_state.get("next_offense_start_team", "A"), "A")
+    st.session_state.offense_start_team = next_offense if next_offense in {"A", "B"} else "A"
+    st.session_state.next_offense_start_team = ""
     st.session_state.team_a_member = MEMBER_OPTIONS[0]
     st.session_state.team_b_member = MEMBER_OPTIONS[2]
     st.session_state.team_a_force = FORCE_OPTIONS[0]
@@ -272,10 +287,13 @@ def reset_turn_inputs() -> None:
             del st.session_state[key]
 
 
-def schedule_turn_input_reset() -> None:
+# schedule_turn_input_reset関数: 次回rerunで入力欄リセット予約
+def schedule_turn_input_reset(next_offense_start_team: str = "") -> None:
+    st.session_state.next_offense_start_team = next_offense_start_team
     st.session_state.pending_turn_input_reset = True
 
 
+# get_gsheets_connection関数: Google Sheets接続を取得
 def get_gsheets_connection():
     try:
         gsheets_module = importlib.import_module("streamlit_gsheets")
@@ -285,6 +303,7 @@ def get_gsheets_connection():
         return None
 
 
+# load_turns_from_gsheets関数: turn_logを読み込みsession_stateへ反映
 def load_turns_from_gsheets() -> tuple[bool, str]:
     conn = get_gsheets_connection()
     if conn is None:
@@ -303,13 +322,14 @@ def load_turns_from_gsheets() -> tuple[bool, str]:
         return False, f"Google Sheets読込に失敗しました: {e}"
 
 
+# save_turns_to_gsheets関数: turn_log/event_logをマージ保存
 def save_turns_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
     conn = get_gsheets_connection()
     if conn is None:
         return False, "Google Sheets接続が見つかりません。設定または依存パッケージを確認してください。"
 
     try:
-        # turn_log: turn_idでUPSERT
+        # turn_log: turn_idでUPSERT（同一turn_idは最新を採用）
         existing_turn_df = conn.read(worksheet=GSHEETS_WORKSHEET, ttl=0)
         if existing_turn_df is None or existing_turn_df.empty:
             merged_turn_df = df.copy()
@@ -342,6 +362,7 @@ def save_turns_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         return False, f"Google Sheets保存に失敗しました: {e}"
 
 
+# sync_turns_to_gsheets_from_state関数: state->DataFrame化してSheetsへ同期
 def sync_turns_to_gsheets_from_state() -> tuple[bool, str]:
     df = turns_to_dataframe(st.session_state.turns)
     ok, msg = save_turns_to_gsheets(df)
@@ -350,6 +371,7 @@ def sync_turns_to_gsheets_from_state() -> tuple[bool, str]:
     return ok, msg
 
 
+# build_event_export_dataframe関数: turn配列をevent_log形式へ展開
 def build_event_export_dataframe(turns: list[dict]) -> pd.DataFrame:
     columns = [
         "event_id",
@@ -501,6 +523,7 @@ def build_event_export_dataframe(turns: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+# dataframe_to_turns関数: turn_log DataFrameを内部turn配列へ変換
 def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
     if df.empty:
         return []
@@ -568,6 +591,18 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
                 "turn_id": safe_str(row.get("turn_id", "")),
                 "match_date": safe_str(row.get("match_date", "")),
                 "match_title": safe_str(row.get("match_title", "練習試合"), "練習試合"),
+                "match_format": safe_str(row.get("match_format", MATCH_FORMAT_OPTIONS[0]), MATCH_FORMAT_OPTIONS[0]),
+                "od_start_rule": safe_str(
+                    row.get(
+                        "od_start_rule",
+                        default_od_start_rule_for_match_format(
+                            safe_str(row.get("match_format", MATCH_FORMAT_OPTIONS[0]), MATCH_FORMAT_OPTIONS[0])
+                        ),
+                    ),
+                    default_od_start_rule_for_match_format(
+                        safe_str(row.get("match_format", MATCH_FORMAT_OPTIONS[0]), MATCH_FORMAT_OPTIONS[0])
+                    ),
+                ),
                 "team_a_name": team_a_name,
                 "team_b_name": team_b_name,
                 "offense_start_team": offense_start_team,
@@ -622,6 +657,7 @@ def dataframe_to_turns(df: pd.DataFrame) -> list[dict]:
     return records
 
 
+# turns_to_dataframe関数: 内部turn配列をturn_log DataFrameへ変換
 def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
     if not turns:
         return pd.DataFrame(
@@ -631,6 +667,8 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
                 "turn_id",
                 "match_date",
                 "match_title",
+                "match_format",
+                "od_start_rule",
                 "team_a_name",
                 "team_b_name",
                 "created_at",
@@ -681,6 +719,11 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
                 "turn_id": safe_str(turn.get("turn_id", ""), "") or build_turn_id(match_id, turn_no),
                 "match_date": turn.get("match_date", ""),
                 "match_title": turn.get("match_title", "練習試合"),
+                "match_format": turn.get("match_format", MATCH_FORMAT_OPTIONS[0]),
+                "od_start_rule": turn.get(
+                    "od_start_rule",
+                    default_od_start_rule_for_match_format(turn.get("match_format", MATCH_FORMAT_OPTIONS[0])),
+                ),
                 "team_a_name": turn.get("team_a_name", "Aチーム"),
                 "team_b_name": turn.get("team_b_name", "Bチーム"),
                 "created_at": created_at,
@@ -718,6 +761,7 @@ def turns_to_dataframe(turns: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# add_turn関数: 1ターンを整形してstateへ追加
 def add_turn(
     point_winner: str,
     offense_start_team: str,
@@ -734,6 +778,8 @@ def add_turn(
     score_to_player: str,
     match_date: object,
     match_title: str,
+    match_format: str,
+    od_start_rule: str,
     team_a_name: str,
     team_b_name: str,
     input_by: str,
@@ -742,6 +788,11 @@ def add_turn(
 ) -> None:
     created_at = now_iso()
     safe_match_title = normalize_unknown(match_title)
+    safe_match_format = normalize_unknown(match_format)
+    safe_od_start_rule = safe_str(
+        od_start_rule,
+        default_od_start_rule_for_match_format(safe_match_format),
+    )
     safe_team_a_name = normalize_unknown(team_a_name)
     safe_team_b_name = normalize_unknown(team_b_name)
     match_id = normalize_unknown(match_id_override)
@@ -803,6 +854,8 @@ def add_turn(
         "input_by": normalize_unknown(input_by),
         "match_date": str(match_date) if match_date is not None else "",
         "match_title": safe_match_title,
+        "match_format": safe_match_format,
+        "od_start_rule": safe_od_start_rule,
         "team_a_name": safe_team_a_name,
         "team_b_name": safe_team_b_name,
         "offense_start_team": offense_start_team,
@@ -825,6 +878,7 @@ def add_turn(
     st.session_state.turns.append(new_turn)
 
 
+# validate_turn_input関数: 入力値を検証/正規化して保存前整形
 def validate_turn_input(score_to_player: str, drop_events: list[dict]) -> list[str]:
     # 空欄は保存時に「-」へ統一する運用
     _ = normalize_unknown(score_to_player)
@@ -848,6 +902,7 @@ def validate_turn_input(score_to_player: str, drop_events: list[dict]) -> list[s
     return []
 
 
+# collect_turn_events関数: 新規入力フォームからイベント配列を作成
 def collect_turn_events(drop_count: int) -> list[dict]:
     events: list[dict] = []
     for i in range(drop_count):
@@ -944,6 +999,7 @@ def collect_turn_events(drop_count: int) -> list[dict]:
     return events
 
 
+# collect_edit_events関数: 編集フォームからイベント配列を作成
 def collect_edit_events(edit_drop_count: int) -> list[dict]:
     events: list[dict] = []
     for i in range(edit_drop_count):
@@ -1040,6 +1096,7 @@ def collect_edit_events(edit_drop_count: int) -> list[dict]:
     return events
 
 
+# load_turn_into_edit_state関数: 指定ターンを編集用stateへ展開
 def load_turn_into_edit_state(turn_index: int) -> None:
     turn = st.session_state.turns[turn_index]
     st.session_state.edit_target_turn_no = turn_index + 1
@@ -1089,6 +1146,7 @@ def load_turn_into_edit_state(turn_index: int) -> None:
         st.session_state[f"edit_event_{i}_nice_defense_type"] = event.get("nice_defense_type", NICE_DEFENSE_TYPE_OPTIONS[0])
 
 
+# load_match_info_into_edit_state関数: 試合情報を一括編集フォームへ読み込む
 def load_match_info_into_edit_state(match_id: str) -> None:
     target = None
     for turn in st.session_state.turns:
@@ -1102,11 +1160,26 @@ def load_match_info_into_edit_state(match_id: str) -> None:
     st.session_state.edit_match_target_id = normalize_unknown(match_id)
     st.session_state.edit_matchinfo_date = parse_date_text_or_today(target.get("match_date", ""))
     st.session_state.edit_matchinfo_title = safe_str(target.get("match_title", ""), UNKNOWN_VALUE)
+    loaded_match_format = safe_str(target.get("match_format", MATCH_FORMAT_OPTIONS[0]), MATCH_FORMAT_OPTIONS[0])
+    st.session_state.edit_matchinfo_format = loaded_match_format
+    st.session_state.edit_matchinfo_od_start_rule = safe_str(
+        target.get("od_start_rule", default_od_start_rule_for_match_format(loaded_match_format)),
+        default_od_start_rule_for_match_format(loaded_match_format),
+    )
     st.session_state.edit_matchinfo_team_a_name = safe_str(target.get("team_a_name", ""), "Aチーム")
     st.session_state.edit_matchinfo_team_b_name = safe_str(target.get("team_b_name", ""), "Bチーム")
 
 
-def apply_match_info_to_match_id(match_id: str, match_date: object, match_title: str, team_a_name: str, team_b_name: str) -> int:
+# apply_match_info_to_match_id関数: 同一match_idの試合情報を一括更新
+def apply_match_info_to_match_id(
+    match_id: str,
+    match_date: object,
+    match_title: str,
+    match_format: str,
+    od_start_rule: str,
+    team_a_name: str,
+    team_b_name: str,
+) -> int:
     target_id = normalize_unknown(match_id)
     updated_at = now_iso()
     updated = 0
@@ -1117,6 +1190,11 @@ def apply_match_info_to_match_id(match_id: str, match_date: object, match_title:
 
         turn["match_date"] = str(match_date) if match_date is not None else ""
         turn["match_title"] = normalize_unknown(match_title)
+        turn["match_format"] = normalize_unknown(match_format)
+        turn["od_start_rule"] = safe_str(
+            od_start_rule,
+            default_od_start_rule_for_match_format(normalize_unknown(match_format)),
+        )
         turn["team_a_name"] = normalize_unknown(team_a_name)
         turn["team_b_name"] = normalize_unknown(team_b_name)
         turn["updated_at"] = updated_at
@@ -1126,11 +1204,17 @@ def apply_match_info_to_match_id(match_id: str, match_date: object, match_title:
     return updated
 
 
+# apply_edit_to_turn関数: 既存ターン内容を更新（ID保持）
 def apply_edit_to_turn(turn_index: int) -> None:
     old_turn = st.session_state.turns[turn_index]
     old_turn_no = safe_int(old_turn.get("turn_no", turn_index + 1), turn_index + 1)
     old_match_id = normalize_unknown(old_turn.get("match_id", ""))
     old_match_title = normalize_unknown(old_turn.get("match_title", "練習試合"))
+    old_match_format = normalize_unknown(old_turn.get("match_format", MATCH_FORMAT_OPTIONS[0]))
+    old_od_start_rule = safe_str(
+        old_turn.get("od_start_rule", default_od_start_rule_for_match_format(old_match_format)),
+        default_od_start_rule_for_match_format(old_match_format),
+    )
     old_team_a_name = normalize_unknown(old_turn.get("team_a_name", "Aチーム"))
     old_team_b_name = normalize_unknown(old_turn.get("team_b_name", "Bチーム"))
     old_match_date = safe_str(old_turn.get("match_date", ""), "")
@@ -1152,6 +1236,8 @@ def apply_edit_to_turn(turn_index: int) -> None:
         "input_by": normalize_unknown(st.session_state.get("edit_input_by", st.session_state.get("input_by", UNKNOWN_VALUE))),
         "match_date": old_match_date,
         "match_title": old_match_title,
+        "match_format": old_match_format,
+        "od_start_rule": old_od_start_rule,
         "team_a_name": old_team_a_name,
         "team_b_name": old_team_b_name,
         "offense_start_team": safe_str(st.session_state.edit_offense_start_team, "A"),
@@ -1175,6 +1261,7 @@ def apply_edit_to_turn(turn_index: int) -> None:
     st.session_state.turns[turn_index] = updated_turn
 
 
+# build_events_dataframe関数: turnログからイベント詳細DataFrameを生成
 def build_events_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict] = []
     for _, row in df.iterrows():
@@ -1202,6 +1289,8 @@ def build_events_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 initialize_state()
 initialize_input_state()
+
+# ここから画面描画
 
 if not st.session_state.gsheets_bootstrapped:
     ok, msg = load_turns_from_gsheets()
@@ -1232,9 +1321,41 @@ if (
     selected_match = match_index[st.session_state.selected_match_id]
     st.session_state.match_date = selected_match["match_date"]
     st.session_state.match_title = selected_match["match_title"]
+    st.session_state.match_format = selected_match.get("match_format", MATCH_FORMAT_OPTIONS[0])
+    st.session_state.od_start_rule = selected_match.get(
+        "od_start_rule",
+        default_od_start_rule_for_match_format(st.session_state.match_format),
+    )
     st.session_state.team_a_name = selected_match["team_a_name"]
     st.session_state.team_b_name = selected_match["team_b_name"]
     st.session_state.last_selected_match_id = st.session_state.selected_match_id
+
+if st.session_state.match_input_mode == "新規試合作成":
+    current_format = safe_str(st.session_state.match_format, MATCH_FORMAT_OPTIONS[0])
+    if st.session_state.last_applied_match_format != current_format:
+        if current_format == MATCH_FORMAT_OPTIONS[0]:
+            st.session_state.team_a_name = "Oセット"
+            st.session_state.team_b_name = "Dセット"
+            st.session_state.offense_start_team = "A"
+        elif current_format == MATCH_FORMAT_OPTIONS[1]:
+            st.session_state.team_a_name = "Aチーム"
+            st.session_state.team_b_name = "Bチーム"
+            st.session_state.offense_start_team = "A"
+        else:
+            st.session_state.team_a_name = "東大"
+            if st.session_state.team_b_name in {"Aチーム", "Bチーム", "Oセット", "Dセット"}:
+                st.session_state.team_b_name = "相手"
+            st.session_state.offense_start_team = "A"
+
+        st.session_state.od_start_rule = default_od_start_rule_for_match_format(current_format)
+        st.session_state.last_applied_match_format = current_format
+
+    st.session_state.match_title = build_auto_match_title(
+        st.session_state.match_format,
+        st.session_state.team_b_name,
+        safe_str(st.session_state.title_event_name, "練習試合"),
+        safe_int(st.session_state.title_game_no, 1),
+    )
 
 if st.session_state.match_input_mode == "既存試合に追記/編集" and st.session_state.selected_match_id in match_index:
     active_match_id = st.session_state.selected_match_id
@@ -1294,9 +1415,17 @@ with st.container(border=True):
 
     lock_match_info = st.session_state.match_input_mode == "既存試合に追記/編集" and bool(match_ids)
     st.date_input("試合日", key="match_date", disabled=lock_match_info)
-    st.text_input("試合タイトル", key="match_title", placeholder="例: 春季リーグ 第2節", disabled=lock_match_info)
+    st.selectbox("試合フォーマット", MATCH_FORMAT_OPTIONS, key="match_format", disabled=lock_match_info)
+    if is_od_format(st.session_state.match_format):
+        st.selectbox("O対Dスタートルール", OD_START_RULE_OPTIONS, key="od_start_rule", disabled=lock_match_info)
+    else:
+        st.session_state.od_start_rule = OD_START_RULE_OPTIONS[1]
+
+    st.text_input("大会名/練習名", key="title_event_name", placeholder="例: 春季リーグ / 練習試合", disabled=lock_match_info)
+    st.number_input("第何試合", min_value=1, step=1, key="title_game_no", disabled=lock_match_info)
     st.text_input("Aチーム名", key="team_a_name", placeholder="例: 東京アルティメット", disabled=lock_match_info)
     st.text_input("Bチーム名", key="team_b_name", placeholder="例: 京都アルティメット", disabled=lock_match_info)
+    st.text_input("試合タイトル（自動）", key="match_title", disabled=True)
     st.text_input("入力者", key="input_by", placeholder="例: nakajima（不明なら -）")
 
 with st.container(border=True):
@@ -1314,6 +1443,49 @@ with st.container(border=True):
 
         st.markdown("##### 得点推移")
         render_score_trend_chart(quick_df, get_team_label("A"), get_team_label("B"))
+
+with st.container(border=True):
+    st.markdown("#### ターンログ / イベントログ（入力補助）")
+    input_help_turn_df = turns_to_dataframe(active_turns)
+    input_help_events_df = build_event_export_dataframe(active_turns)
+
+    if input_help_turn_df.empty:
+        st.caption("この試合のログはまだありません。")
+    else:
+        input_help_turn_df["A_score"] = (input_help_turn_df["point_winner"] == "A").cumsum()
+        input_help_turn_df["B_score"] = (input_help_turn_df["point_winner"] == "B").cumsum()
+        input_help_show = input_help_turn_df[
+            ["turn_no", "offense_start_team", "point_winner", "drop_count", "A_score", "B_score"]
+        ].copy()
+        input_help_show["offense_start_team"] = input_help_show["offense_start_team"].replace(
+            {"A": get_team_label("A"), "B": get_team_label("B")}
+        )
+        input_help_show["point_winner"] = input_help_show["point_winner"].replace(
+            {"A": get_team_label("A"), "B": get_team_label("B")}
+        )
+        input_help_show = input_help_show.rename(
+            columns={"A_score": get_team_label("A"), "B_score": get_team_label("B")}
+        )
+
+        st.markdown("##### 直近ターンログ")
+        st.dataframe(input_help_show.tail(10), use_container_width=True, hide_index=True)
+
+        st.markdown("##### 直近イベントログ")
+        if input_help_events_df.empty:
+            st.caption("イベントログはまだありません。")
+        else:
+            event_cols = [
+                "turn_no",
+                "event_type",
+                "team",
+                "drop_type",
+                "shot_type",
+                "from_player",
+                "to_player",
+                "defender_name",
+            ]
+            existing_event_cols = [c for c in event_cols if c in input_help_events_df.columns]
+            st.dataframe(input_help_events_df[existing_event_cols].tail(20), use_container_width=True, hide_index=True)
 
 with st.container(border=True):
     st.markdown("#### 2) ターン基本情報")
@@ -1366,7 +1538,7 @@ for i in range(drop_count):
         st.markdown(f"**イベント {i + 1}**")
         st.selectbox("イベント種別", EVENT_TYPE_OPTIONS, key=f"event_{i}_cause")
         st.radio(
-            "該当チーム",
+            "オフェンスしてたチーム",
             ["A", "B"],
             horizontal=True,
             key=f"event_{i}_drop_team",
@@ -1454,6 +1626,8 @@ if col_a.button(f"{get_team_label('A')} 得点", use_container_width=True, type=
         score_to_player=st.session_state.score_to_player,
         match_date=st.session_state.match_date,
         match_title=st.session_state.match_title,
+        match_format=st.session_state.match_format,
+        od_start_rule=st.session_state.od_start_rule,
         team_a_name=st.session_state.team_a_name,
         team_b_name=st.session_state.team_b_name,
         input_by=st.session_state.input_by,
@@ -1461,7 +1635,12 @@ if col_a.button(f"{get_team_label('A')} 得点", use_container_width=True, type=
         match_id_override=active_match_id if st.session_state.match_input_mode == "既存試合に追記/編集" else "",
     )
     sync_turns_to_gsheets_from_state()
-    schedule_turn_input_reset()
+    next_offense_team = determine_next_offense_start_team(
+        point_winner="A",
+        match_format=st.session_state.match_format,
+        od_start_rule=st.session_state.od_start_rule,
+    )
+    schedule_turn_input_reset(next_offense_team)
     st.rerun()
 
 if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type="primary"):
@@ -1488,6 +1667,8 @@ if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type=
         score_to_player=st.session_state.score_to_player,
         match_date=st.session_state.match_date,
         match_title=st.session_state.match_title,
+        match_format=st.session_state.match_format,
+        od_start_rule=st.session_state.od_start_rule,
         team_a_name=st.session_state.team_a_name,
         team_b_name=st.session_state.team_b_name,
         input_by=st.session_state.input_by,
@@ -1495,7 +1676,12 @@ if col_b.button(f"{get_team_label('B')} 得点", use_container_width=True, type=
         match_id_override=active_match_id if st.session_state.match_input_mode == "既存試合に追記/編集" else "",
     )
     sync_turns_to_gsheets_from_state()
-    schedule_turn_input_reset()
+    next_offense_team = determine_next_offense_start_team(
+        point_winner="B",
+        match_format=st.session_state.match_format,
+        od_start_rule=st.session_state.od_start_rule,
+    )
+    schedule_turn_input_reset(next_offense_team)
     st.rerun()
 
 with st.container(border=True):
@@ -1527,6 +1713,11 @@ with st.expander("試合情報編集（同一match_idを一括更新）", expand
             with st.container(border=True):
                 st.date_input("試合日", key="edit_matchinfo_date")
                 st.text_input("試合タイトル", key="edit_matchinfo_title")
+                st.selectbox("試合フォーマット", MATCH_FORMAT_OPTIONS, key="edit_matchinfo_format")
+                if is_od_format(st.session_state.edit_matchinfo_format):
+                    st.selectbox("O対Dスタートルール", OD_START_RULE_OPTIONS, key="edit_matchinfo_od_start_rule")
+                else:
+                    st.session_state.edit_matchinfo_od_start_rule = OD_START_RULE_OPTIONS[1]
                 st.text_input("Aチーム名", key="edit_matchinfo_team_a_name")
                 st.text_input("Bチーム名", key="edit_matchinfo_team_b_name")
 
@@ -1535,6 +1726,8 @@ with st.expander("試合情報編集（同一match_idを一括更新）", expand
                     active_match_id,
                     st.session_state.edit_matchinfo_date,
                     st.session_state.edit_matchinfo_title,
+                    st.session_state.edit_matchinfo_format,
+                    st.session_state.edit_matchinfo_od_start_rule,
                     st.session_state.edit_matchinfo_team_a_name,
                     st.session_state.edit_matchinfo_team_b_name,
                 )
