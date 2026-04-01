@@ -238,6 +238,7 @@ def initialize_input_state() -> None:
         "title_game_no": 1,
         "last_applied_match_format": "",
         "next_offense_start_team": "",
+        "last_offense_start_team_for_defaults": "",
         "team_a_name": "Aチーム",
         "team_b_name": "Bチーム",
         "input_by": UNKNOWN_VALUE,
@@ -269,6 +270,7 @@ def reset_turn_inputs() -> None:
     next_offense = safe_str(st.session_state.get("next_offense_start_team", "A"), "A")
     st.session_state.offense_start_team = next_offense if next_offense in {"A", "B"} else "A"
     st.session_state.next_offense_start_team = ""
+    st.session_state.last_offense_start_team_for_defaults = ""
     st.session_state.team_a_member = MEMBER_OPTIONS[0]
     st.session_state.team_b_member = MEMBER_OPTIONS[2]
     st.session_state.team_a_force = FORCE_OPTIONS[0]
@@ -291,6 +293,17 @@ def reset_turn_inputs() -> None:
 def schedule_turn_input_reset(next_offense_start_team: str = "") -> None:
     st.session_state.next_offense_start_team = next_offense_start_team
     st.session_state.pending_turn_input_reset = True
+
+
+# apply_offense_side_input_defaults関数: オフェンス側のD/フォース初期値を「-」へ寄せる
+def apply_offense_side_input_defaults() -> None:
+    offense = safe_str(st.session_state.get("offense_start_team", "A"), "A")
+    if offense == "A":
+        st.session_state.team_a_force = "-"
+        st.session_state.team_a_defense_type = "-"
+    else:
+        st.session_state.team_b_force = "-"
+        st.session_state.team_b_defense_type = "-"
 
 
 # get_gsheets_connection関数: Google Sheets接続を取得
@@ -902,12 +915,26 @@ def validate_turn_input(score_to_player: str, drop_events: list[dict]) -> list[s
     return []
 
 
+# get_event_offense_team関数: 指定イベント時点のオフェンスチームを自動算出
+def get_event_offense_team(event_index: int) -> str:
+    offense_team = safe_str(st.session_state.get("offense_start_team", "A"), "A")
+    if offense_team not in {"A", "B"}:
+        offense_team = "A"
+
+    for i in range(event_index):
+        event_type = safe_str(st.session_state.get(f"event_{i}_cause", "ミス"), "ミス")
+        if event_type in {"ナイスディフェンス", "ミス"}:
+            offense_team = "B" if offense_team == "A" else "A"
+
+    return offense_team
+
+
 # collect_turn_events関数: 新規入力フォームからイベント配列を作成
 def collect_turn_events(drop_count: int) -> list[dict]:
     events: list[dict] = []
     for i in range(drop_count):
         event_type = safe_str(st.session_state.get(f"event_{i}_cause", "ミス"), "ミス")
-        event_team = safe_str(st.session_state.get(f"event_{i}_drop_team", "A"), "A")
+        event_team = get_event_offense_team(i)
         if event_type == "ナイスディフェンス":
             throw_category = safe_str(
                 st.session_state.get(f"event_{i}_throw_category", THROW_CATEGORY_OPTIONS[0]),
@@ -1357,6 +1384,11 @@ if st.session_state.match_input_mode == "新規試合作成":
         safe_int(st.session_state.title_game_no, 1),
     )
 
+current_offense_start_team = safe_str(st.session_state.get("offense_start_team", "A"), "A")
+if st.session_state.get("last_offense_start_team_for_defaults", "") != current_offense_start_team:
+    apply_offense_side_input_defaults()
+    st.session_state.last_offense_start_team_for_defaults = current_offense_start_team
+
 if st.session_state.match_input_mode == "既存試合に追記/編集" and st.session_state.selected_match_id in match_index:
     active_match_id = st.session_state.selected_match_id
 else:
@@ -1537,12 +1569,16 @@ for i in range(drop_count):
     with st.container(border=True):
         st.markdown(f"**イベント {i + 1}**")
         st.selectbox("イベント種別", EVENT_TYPE_OPTIONS, key=f"event_{i}_cause")
+
+        auto_event_team = get_event_offense_team(i)
+        st.session_state[f"event_{i}_drop_team"] = auto_event_team
         st.radio(
-            "オフェンスしてたチーム",
+            "オフェンスしてたチーム（自動）",
             ["A", "B"],
             horizontal=True,
             key=f"event_{i}_drop_team",
             format_func=get_team_label,
+            disabled=True,
         )
 
         if st.session_state.get(f"event_{i}_cause", "ミス") == "ナイスディフェンス":
