@@ -4,6 +4,6 @@ name = "data input"
 icon = "📝"
 
 [[pages]]
-path = "pages/2_data_analysys.py"
+path = "pages/2_data_analysis.py"
 name = "data analysis"
 icon = "📊"
